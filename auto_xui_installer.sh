@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # auto_xui_installer.sh - Скрипт автоматической установки и настройки 3x-ui
-# Версия: 1.2
+# Версия: 1.3
 # Использование: bash <(curl -Ls https://raw.githubusercontent.com/Rrezzak09VPN/auto-xui-setup/main/auto_xui_installer.sh)
 
 set -e
@@ -28,6 +28,12 @@ log_error() {
 
 log_success() {
     echo -e "${GREEN}[SUCCESS]$(date '+%Y-%m-%d %H:%M:%S')${NC} $1"
+}
+
+log_debug() {
+    # Включите для отладки, закомментируйте для обычного режима
+    # echo -e "${PURPLE}[DEBUG]$(date '+%Y-%m-%d %H:%M:%S')${NC} $1"
+    :
 }
 
 # --- Переменные ---
@@ -91,15 +97,63 @@ if [[ ! -f "$DB_PATH" ]]; then
     exit 1
 fi
 
-# Исправлено: правильные названия полей webCertFile и webKeyFile
-if ! sqlite3 "$DB_PATH" "UPDATE settings SET value='$CERT_CRT_FILE' WHERE key='webCertFile';" > /dev/null 2>&1; then
-    log_error "Ошибка при обновлении пути к файлу сертификата в базе данных."
-    exit 1
+# Проверим текущие записи в таблице settings для отладки
+log_debug "Текущие записи в таблице settings, связанные с сертификатами:"
+sqlite3 "$DB_PATH" "SELECT key, value FROM settings WHERE key LIKE '%Cert%' OR key LIKE '%Key%';" 2>/dev/null || log_debug "Не удалось получить записи о сертификатах."
+
+# Функция для обновления или вставки значения в таблицу settings
+# Использует INSERT OR REPLACE для корректной работы
+update_or_insert_setting() {
+    local key_name="$1"
+    local value_name="$2"
+    log_debug "Попытка обновления/вставки: $key_name = $value_name"
+
+    # Проверяем, существует ли запись
+    local count=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM settings WHERE key='$key_name';" 2>/dev/null || echo "0")
+
+    if [[ "$count" -gt 0 ]]; then
+        # Запись существует, обновляем
+        if sqlite3 "$DB_PATH" "UPDATE settings SET value='$value_name' WHERE key='$key_name';" > /dev/null 2>&1; then
+            log_debug "Запись $key_name обновлена."
+        else
+            log_error "Ошибка при обновлении записи $key_name."
+            return 1
+        fi
+    else
+        # Записи нет, вставляем новую
+        # Нам нужно определить следующий id. Проще использовать INSERT OR REPLACE.
+        # Но для этого нужно знать все поля. Предположим, что id автоинкрементируется или мы можем его опустить.
+        # Лучше использовать INSERT OR REPLACE напрямую.
+        if sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO settings (key, value) VALUES ('$key_name', '$value_name');" > /dev/null 2>&1; then
+            log_debug "Запись $key_name вставлена или заменена."
+        else
+            log_error "Ошибка при вставке/замене записи $key_name."
+            return 1
+        fi
+    fi
+}
+
+# Обновляем или вставляем пути к сертификатам
+if ! update_or_insert_setting "webCertFile" "$CERT_CRT_FILE"; then
+    log_error "Ошибка при обработке пути к файлу сертификата ($CERT_CRT_FILE)."
+    # Попробуем альтернативный метод: прямой INSERT OR REPLACE
+    if ! sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO settings (key, value) VALUES ('webCertFile', '$CERT_CRT_FILE');" > /dev/null 2>&1; then
+        log_error "Альтернативный метод: Ошибка при обновлении пути к файлу сертификата в базе данных."
+        exit 1
+    else
+        log_debug "Альтернативный метод: Путь к файлу сертификата обновлен."
+    fi
 fi
 
-if ! sqlite3 "$DB_PATH" "UPDATE settings SET value='$CERT_KEY_FILE' WHERE key='webKeyFile';" > /dev/null 2>&1; then
-    log_error "Ошибка при обновлении пути к файлу ключа в базе данных."
-    exit 1
+if ! update_or_insert_setting "webKeyFile" "$CERT_KEY_FILE"; then
+    log_error "Ошибка при обработке пути к файлу ключа ($CERT_KEY_FILE)."
+    # Попробуем альтернативный метод
+    if ! sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO settings (key, value) VALUES ('webKeyFile', '$CERT_KEY_FILE');" > /dev/null 2>&1; then
+        log_error "Альтернативный метод: Ошибка при обновлении пути к файлу ключа в базе данных."
+        exit 1
+    else
+        log_debug "Альтернативный метод: Путь к файлу ключа обновлен."
+    fi
 fi
 
 log_success "Пути к сертификатам обновлены в базе данных."
@@ -182,11 +236,17 @@ replace_or_add_icmp_rules() {
     if grep -q "^# ok icmp codes for $section" "$BEFORE_RULES_FILE"; then
         # Заменяем существующие ACCEPT на DROP
         sed -i "/^# ok icmp codes for $section/,/^# End of ok icmp codes for $section/ s/-j ACCEPT/-j DROP/g" "$BEFORE_RULES_FILE"
+        log_debug "Правила ACCEPT в секции $section заменены на DROP."
     else
         # Если секции нет, создаем её перед # End required lines
         line_num=$(grep -n "^# End required lines" "$BEFORE_RULES_FILE" | cut -d: -f1)
         if [[ -n "$line_num" ]]; then
             sed -i "${line_num}i # ok icmp codes for $section\n# End of ok icmp codes for $section\n" "$BEFORE_RULES_FILE"
+            log_debug "Секция $section добавлена."
+        else
+             # Если # End required lines не найдена, добавляем в конец
+             echo -e "\n# ok icmp codes for $section\n# End of ok icmp codes for $section" >> "$BEFORE_RULES_FILE"
+             log_debug "Секция $section добавлена в конец файла."
         fi
     fi
 
@@ -202,9 +262,11 @@ replace_or_add_icmp_rules() {
     for rule_type in "${rules[@]}"; do
         if grep -q "\-\-icmp-type $rule_type" "$BEFORE_RULES_FILE"; then
             sed -i "/--icmp-type $rule_type/s/-j ACCEPT/-j DROP/" "$BEFORE_RULES_FILE"
+            log_debug "Правило $rule_type в секции $section обновлено на DROP."
         else
             # Добавляем правило перед # End of ok icmp codes
             sed -i "/# End of ok icmp codes for $section/i -A ufw-before-$section -p icmp --icmp-type $rule_type -j DROP" "$BEFORE_RULES_FILE"
+            log_debug "Правило $rule_type добавлено в секцию $section."
         fi
     done
 }
