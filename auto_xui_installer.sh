@@ -1,309 +1,239 @@
 #!/bin/bash
 
-# Скрипт автоматической установки 3x-ui с надежной перезагрузкой и автозапуском
-# Версия: 2.1
+# auto_xui_installer.sh - Скрипт автоматической установки и настройки 3x-ui
+# Версия: 1.1
+# Использование: bash <(curl -Ls https://raw.githubusercontent.com/Rrezzak09VPN/auto-xui-setup/main/auto_xui_installer.sh)
 
-# --- Цвета ---
+set -e
+
+# --- Цвета для вывода ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-PURPLE='\033[0;35m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# --- Глобальные переменные ---
-SCRIPT_DIR="/root"
-PHASE2_SCRIPT_NAME="xui_phase2_installer.sh"
-PHASE2_SCRIPT_PATH="$SCRIPT_DIR/$PHASE2_SCRIPT_NAME"
-SERVICE_NAME="xui-phase2-install.service"
-SERVICE_FILE_PATH="/etc/systemd/system/$SERVICE_NAME"
-STATE_FILE="/tmp/xui_install_state"
-MARKER_FILE="/tmp/xui_phase2_marker"
-
-# --- Функции логирования ---
+# --- Функция логирования ---
 log() {
-    echo -e "${GREEN}[INFO]${NC} $1"
+    echo -e "${BLUE}[INFO]$(date '+%Y-%m-%d %H:%M:%S')${NC} $1"
 }
 
-warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1" >&2
+log_warn() {
+    echo -e "${YELLOW}[WARNING]$(date '+%Y-%m-%d %H:%M:%S')${NC} $1"
 }
 
-error() {
-    echo -e "${RED}[ERROR]${NC} $1" >&2
-    exit 1
+log_error() {
+    echo -e "${RED}[ERROR]$(date '+%Y-%m-%d %H:%M:%S')${NC} $1" >&2
 }
 
-success() {
-    echo -e "${CYAN}[SUCCESS]${NC} $1"
+log_success() {
+    echo -e "${GREEN}[SUCCESS]$(date '+%Y-%m-%d %H:%M:%S')${NC} $1"
 }
 
-# --- Проверки ---
-check_root() {
-    if [[ $EUID -ne 0 ]]; then
-        error "Этот скрипт должен быть запущен с правами root"
-    fi
-}
+# --- Переменные ---
+DB_PATH="/etc/x-ui/x-ui.db"
+CERT_DIR="/etc/ssl/xui"
+CERT_KEY_FILE="$CERT_DIR/secret.key"
+CERT_CRT_FILE="$CERT_DIR/cert.crt"
 
-check_internet() {
-    log "Проверка подключения к интернету..."
-    if ! ping -c 1 -W 5 8.8.8.8 &> /dev/null && ! ping -c 1 -W 5 1.1.1.1 &> /dev/null; then
-        error "Нет подключения к интернету. Проверьте сетевые настройки."
-    fi
-    success "Подключение к интернету доступно."
-}
-
-# --- Управление состоянием ---
-get_state() {
-    if [[ -f "$STATE_FILE" ]]; then
-        cat "$STATE_FILE"
-    else
-        echo "initial"
-    fi
-}
-
-set_state() {
-    echo "$1" > "$STATE_FILE"
-}
-
-# --- Этап 1: Обновление системы ---
-phase1_update_system() {
-    log "Этап 1: Обновление системы..."
-    set_state "updating"
-
-    export DEBIAN_FRONTEND=noninteractive
-
-    log "Обновление списков пакетов..."
-    apt-get update -y || warn "Не удалось обновить списки пакетов apt"
-
-    log "Обновление установленных пакетов..."
-    apt-get upgrade -y -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" || warn "Не все пакеты были обновлены"
-
-    log "Установка необходимых зависимостей..."
-    apt-get install -y \
-        curl wget sqlite3 openssl ufw net-tools tzdata \
-        python3 python3-pip || error "Не удалось установить базовые зависимости"
-
-    # Безопасная установка bcrypt
-    log "Установка Python bcrypt..."
-    if command -v pip3 &> /dev/null; then
-        pip3 install --user bcrypt --quiet && log "Bcrypt установлен в пользовательскую директорию." && return 0
-        warn "Установка в пользовательскую директорию не удалась, пробуем системную установку..."
-        apt-get install -y python3-bcrypt && log "Bcrypt установлен через apt." && return 0
-        warn "Установка через apt не удалась, пробуем pip с флагом --break-system-packages..."
-        pip3 install bcrypt --break-system-packages --quiet && log "Bcrypt установлен через pip (с флагом --break-system-packages)." && return 0
-    else
-        apt-get install -y python3-bcrypt && log "Bcrypt установлен через apt (pip3 не найден)." && return 0
-    fi
-    error "Не удалось установить Python bcrypt всеми способами."
-    success "Система обновлена"
-}
-
-# --- Этап 2: Настройка автозапуска продолжения ---
-phase1_setup_autostart() {
-    log "Этап 2: Настройка автозапуска второй фазы..."
-
-    # 1. Создаем скрипт для второй фазы
-    cat > "$PHASE2_SCRIPT_PATH" << 'PHASE2_EOF'
-#!/bin/bash
-set -e
-
-# --- Цвета для второй фазы ---
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
-
-# --- Функции логирования для второй фазы ---
-log() {
-    echo -e "${GREEN}[PHASE2]${NC} $1"
-}
-
-warn() {
-    echo -e "${YELLOW}[PHASE2_WARN]${NC} $1" >&2
-}
-
-error() {
-    echo -e "${RED}[PHASE2_ERROR]${NC} $1" >&2
-    # Удаляем маркер, чтобы основной скрипт знал об ошибке
-    rm -f /tmp/xui_phase2_marker
-    exit 1
-}
-
-success() {
-    echo -e "${CYAN}[PHASE2_SUCCESS]${NC} $1"
-}
-
-# --- Основная логика второй фазы ---
-log "Начало второй фазы установки: Установка 3x-ui и настройка..."
-
-# --- Шаг 1: Установка 3x-ui через официальный скрипт ---
-log "Шаг 1: Запуск официального установщика 3x-ui..."
-bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) || error "Ошибка при запуске официального установщика 3x-ui"
-success "3x-ui успешно установлен через официальный скрипт."
-
-# --- Шаг 2: Ожидание инициализации сервиса ---
-log "Шаг 2: Ожидание инициализации сервиса x-ui..."
-sleep 15
-
-# --- Шаг 3: Генерация и настройка SSL ---
-log "Шаг 3: Генерация SSL-сертификата..."
-mkdir -p /etc/ssl/xui
-
-# Генерируем сертификат на 10 лет
-if openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-    -keyout /etc/ssl/xui/secret.key \
-    -out /etc/ssl/xui/cert.crt \
-    -subj "/C=US/ST=State/L=City/O=X-UI-Panel/CN=$(hostname -I | awk '{print $1}')" \
-    -addext "subjectAltName=DNS:$(hostname),IP:$(hostname -I | awk '{print $1}')" &>/dev/null; then
-    chmod 600 /etc/ssl/xui/secret.key
-    chmod 644 /etc/ssl/xui/cert.crt
-    success "SSL-сертификат успешно создан."
-else
-    error "Не удалось создать SSL-сертификат."
+# --- Проверка прав root ---
+if [[ $EUID -ne 0 ]]; then
+   log_error "Этот скрипт должен быть запущен с правами root (sudo)."
+   exit 1
 fi
 
-# --- Шаг 4: Настройка SSL в 3x-ui ---
-log "Шаг 4: Настройка SSL-сертификатов в 3x-ui..."
-systemctl stop x-ui
+# --- Начало установки ---
+echo "========================================"
+log "Начало автоматической установки и настройки 3x-ui"
+echo "========================================"
 
-# Используем встроенную команду 3x-ui для установки SSL
-if command -v x-ui &> /dev/null; then
-    if x-ui setting -webCertFile "/etc/ssl/xui/cert.crt" -webKeyFile "/etc/ssl/xui/secret.key"; then
-        success "Пути к SSL-сертификатам успешно установлены в 3x-ui."
-    else
-        error "Не удалось установить пути к SSL-сертификатам через команду x-ui."
-    fi
-else
-    error "Команда x-ui не найдена после установки."
+# --- Шаг 1: Установка зависимостей ---
+log "Установка необходимых зависимостей..."
+apt-get update > /dev/null 2>&1 || log_warn "Не удалось обновить списки пакетов. Продолжаем с текущими."
+apt-get install -y curl openssl sqlite3 ufw > /dev/null 2>&1 || { log_error "Не удалось установить необходимые зависимости."; exit 1; }
+log_success "Зависимости установлены."
+
+# --- Шаг 2: Установка 3x-ui ---
+log "Запуск официального скрипта установки 3x-ui..."
+# Используем yes для автоматического подтверждения
+if ! yes | bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) > /dev/null 2>&1; then
+    log_error "Ошибка при выполнении официального скрипта установки 3x-ui."
+    exit 1
+fi
+log_success "3x-ui установлен."
+
+# --- Шаг 3: Генерация SSL сертификата ---
+log "Генерация самоподписанного SSL сертификата..."
+mkdir -p $CERT_DIR
+SERVER_IP=$(hostname -I | awk '{print $1}')
+if [[ -z "$SERVER_IP" ]]; then
+    log_warn "Не удалось автоматически определить IP-адрес сервера. Используется localhost для сертификата."
+    SERVER_IP="localhost"
 fi
 
-# --- Шаг 5: Перезапуск сервиса ---
-log "Шаг 5: Перезапуск сервиса x-ui..."
-systemctl start x-ui || error "Не удалось запустить сервис x-ui после настройки SSL"
-success "Сервис x-ui перезапущен."
+if ! openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+    -keyout "$CERT_KEY_FILE" \
+    -out "$CERT_CRT_FILE" \
+    -subj "/C=US/ST=State/L=City/O=X-UI-Panel/CN=$SERVER_IP" \
+    -addext "subjectAltName=DNS:$(hostname),IP:$SERVER_IP" > /dev/null 2>&1; then
+    log_error "Ошибка при генерации SSL сертификата."
+    exit 1
+fi
 
-# --- Шаг 6: Вывод финальной информации ---
-log "Шаг 6: Получение финальных настроек..."
-FINAL_SETTINGS=$(/usr/local/x-ui/x-ui setting -show true 2>/dev/null || echo "Ошибка получения финальных настроек")
-echo "=========================================="
-echo "         X-UI PANEL УСПЕШНО НАСТРОЕН"
-echo "=========================================="
-echo "$FINAL_SETTINGS"
-echo "=========================================="
-echo "Сохраните эти данные в безопасном месте!"
-echo "=========================================="
+chmod 600 "$CERT_KEY_FILE"
+chmod 644 "$CERT_CRT_FILE"
+log_success "SSL сертификат сгенерирован и сохранен в $CERT_DIR."
 
-# --- Шаг 7: Очистка ---
-log "Шаг 7: Очистка временных файлов второй фазы..."
-# Создаем маркер успешного завершения
-echo "completed" > /tmp/xui_phase2_marker
-success "Вторая фаза установки завершена успешно!"
-PHASE2_EOF
+# --- Шаг 4: Настройка путей к сертификатам в БД ---
+log "Обновление путей к сертификатам в настройках 3x-ui..."
+if [[ ! -f "$DB_PATH" ]]; then
+    log_error "Файл базы данных 3x-ui не найден по пути $DB_PATH."
+    exit 1
+fi
 
-    chmod +x "$PHASE2_SCRIPT_PATH"
+if ! sqlite3 "$DB_PATH" "UPDATE settings SET webKeyFile='$CERT_KEY_FILE', webCertFile='$CERT_CRT_FILE';" > /dev/null 2>&1; then
+    log_error "Ошибка при обновлении путей к сертификатам в базе данных."
+    exit 1
+fi
+log_success "Пути к сертификатам обновлены в базе данных."
 
-    # 2. Создаем systemd сервис для запуска второй фазы при следующей загрузке
-    cat > "$SERVICE_FILE_PATH" << SERVICE_EOF
-[Unit]
-Description=Continue X-UI Installation After Reboot (Phase 2)
-After=network.target
+# --- Шаг 5: Перезапуск 3x-ui ---
+log "Перезапуск службы 3x-ui для применения настроек сертификата..."
+if ! systemctl restart x-ui > /dev/null 2>&1; then
+    log_error "Ошибка при перезапуске службы x-ui."
+    exit 1
+fi
+log_success "Служба 3x-ui перезапущена."
 
-[Service]
-Type=oneshot
-ExecStart=$PHASE2_SCRIPT_PATH
-RemainAfterExit=yes
-StandardOutput=journal
-StandardError=journal
+# --- Шаг 6: Получение порта панели и данных пользователя ---
+log "Получение данных для входа из настроек..."
+if [[ ! -f "$DB_PATH" ]]; then
+    log_error "Файл базы данных 3x-ui не найден по пути $DB_PATH."
+    exit 1
+fi
 
-[Install]
-WantedBy=multi-user.target
-SERVICE_EOF
+WEB_PORT=$(sqlite3 "$DB_PATH" "SELECT value FROM settings WHERE key='webPort';" 2>/dev/null)
+DB_USERNAME=$(sqlite3 "$DB_PATH" "SELECT value FROM settings WHERE key='username';" 2>/dev/null)
+DB_PASSWORD=$(sqlite3 "$DB_PATH" "SELECT value FROM settings WHERE key='password';" 2>/dev/null)
 
-    # 3. Включаем сервис
-    systemctl daemon-reload
-    systemctl enable "$SERVICE_NAME" || error "Не удалось включить сервис продолжения установки"
-    success "Автозапуск второй фазы настроен. Сервис: $SERVICE_NAME"
-}
+if [[ -z "$WEB_PORT" ]] || ! [[ "$WEB_PORT" =~ ^[0-9]+$ ]]; then
+    log_warn "Не удалось получить порт панели из БД. Используется порт по умолчанию 2053."
+    WEB_PORT=2053
+fi
 
-# --- Этап 3: Перезагрузка ---
-phase1_reboot() {
-    log "Этап 3: Перезагрузка системы..."
-    set_state "rebooting"
-    log "Система будет перезагружена через 10 секунд..."
-    log "ПОСЛЕ ПЕЗАГРУЗКИ ПОЖАЛУЙСТА ПОДКЛЮЧИТЕСЬ К СЕРВЕРУ СНОВА!"
-    log "Скрипт автоматически продолжит установку (фаза 2)."
-    sleep 10
-    reboot
-}
+if [[ -z "$DB_USERNAME" ]]; then
+    log_warn "Не удалось получить имя пользователя из БД."
+    DB_USERNAME="Не определено"
+fi
 
-# --- Проверка и завершение ---
-phase1_cleanup_and_wait() {
-    log "Этап 4: Ожидание завершения второй фазы и очистка..."
+if [[ -z "$DB_PASSWORD" ]]; then
+    log_warn "Не удалось получить пароль из БД."
+    DB_PASSWORD="Не определено"
+fi
+
+log "Порт панели: $WEB_PORT"
+log "Имя пользователя: $DB_USERNAME"
+# Пароль не выводим, так как он зашифрован
+
+# --- Шаг 7: Настройка UFW (фаерволл) ---
+log "Настройка UFW: открытие нужных портов и закрытие остальных..."
+# Включение UFW, если он не активен
+if ! ufw status | grep -q "Status: active"; then
+    echo "y" | ufw enable > /dev/null 2>&1 || log_warn "Не удалось автоматически включить UFW."
+fi
+
+# Сброс правил (на случай, если были установлены ранее)
+ufw --force reset > /dev/null 2>&1
+
+# Открытие необходимых портов
+ufw allow 22/tcp > /dev/null 2>&1 || log_warn "Не удалось открыть порт 22 (SSH)."
+ufw allow 443/tcp > /dev/null 2>&1 || log_warn "Не удалось открыть порт 443 (HTTPS)."
+ufw allow $WEB_PORT/tcp > /dev/null 2>&1 || log_warn "Не удалось открыть порт $WEB_PORT (Панель 3x-ui)."
+
+# Запрет всех остальных входящих соединений по умолчанию
+ufw default deny incoming > /dev/null 2>&1 || log_warn "Не удалось установить правило запрета входящих по умолчанию."
+
+# Разрешение всех исходящих соединений по умолчанию
+ufw default allow outgoing > /dev/null 2>&1 || log_warn "Не удалось установить правило разрешения исходящих по умолчанию."
+
+# Перезагрузка UFW для применения всех правил
+ufw --force reload > /dev/null 2>&1 || log_warn "Не удалось перезагрузить UFW."
+log_success "Настройка UFW завершена."
+
+# --- Шаг 8: Блокировка ICMP в UFW ---
+log "Блокировка ICMP (ping) запросов..."
+BEFORE_RULES_FILE="/etc/ufw/before.rules"
+
+# Создание резервной копии
+cp "$BEFORE_RULES_FILE" "${BEFORE_RULES_FILE}.bak_$(date +%Y%m%d_%H%M%S)" > /dev/null 2>&1 || log_warn "Не удалось создать резервную копию $BEFORE_RULES_FILE."
+
+# Функция для замены правил ACCEPT на DROP или добавления новых
+replace_or_add_icmp_rules() {
+    local section="$1"
     
-    local wait_time=0
-    local max_wait=300 # 5 минут
+    # Заменяем существующие ACCEPT на DROP
+    sed -i "/^# ok icmp codes for $section/,/^# End of ok icmp codes for $section/ s/-j ACCEPT/-j DROP/g" "$BEFORE_RULES_FILE"
     
-    # Ждем появления маркера завершения второй фазы
-    while [[ ! -f "$MARKER_FILE" ]] && [[ $wait_time -lt $max_wait ]]; do
-        log "Ожидание завершения второй фазы... (${wait_time}s)"
-        sleep 10
-        wait_time=$((wait_time + 10))
-    done
-
-    if [[ -f "$MARKER_FILE" ]] && [[ "$(cat "$MARKER_FILE")" == "completed" ]]; then
-        success "Вторая фаза успешно завершена!"
-        
-        # Очистка: удаляем все временные файлы и сервис
-        log "Очистка временных файлов..."
-        rm -f "$STATE_FILE"
-        rm -f "$MARKER_FILE"
-        rm -f "$PHASE2_SCRIPT_PATH"
-        
-        systemctl disable "$SERVICE_NAME" --now &>/dev/null || true
-        rm -f "$SERVICE_FILE_PATH"
-        systemctl daemon-reload
-        
-        success "Все временные файлы и сервисы очищены."
-        echo "=========================================="
-        echo "         УСТАНОВКА ЗАВЕРШЕНА!"
-        echo "=========================================="
-        echo "Данные для доступа к панели см. выше."
-        echo "=========================================="
+    # Добавляем source-quench, если его нет (и заменяем ACCEPT на DROP, если он есть)
+    if grep -q "\-\-icmp-type source-quench" "$BEFORE_RULES_FILE"; then
+        sed -i "/--icmp-type source-quench/s/-j ACCEPT/-j DROP/" "$BEFORE_RULES_FILE"
     else
-        error "Вторая фаза не завершилась в течение 5 минут или завершилась с ошибкой."
+        # Добавляем правило source-quench перед # End of ok icmp codes
+        sed -i "/# End of ok icmp codes for $section/i -A ufw-before-$section -p icmp --icmp-type source-quench -j DROP" "$BEFORE_RULES_FILE"
     fi
 }
 
-# --- Основной блок выполнения ---
-main() {
-    check_root
-    check_internet
+replace_or_add_icmp_rules "INPUT"
+replace_or_add_icmp_rules "FORWARD"
 
-    local current_state=$(get_state)
+# Перезагрузка UFW для применения изменений в before.rules
+ufw --force reload > /dev/null 2>&1 || log_warn "Не удалось перезагрузить UFW после изменения ICMP правил."
+log_success "ICMP (ping) запросы заблокированы."
 
-    case "$current_state" in
-        "initial"|"updating")
-            log "Начало процесса установки. Текущее состояние: $current_state"
-            phase1_update_system
-            phase1_setup_autostart
-            phase1_reboot
-            ;;
-        "rebooting")
-            log "Обнаружено состояние 'rebooting'. Это неожиданно. Проверьте систему."
-            # Если скрипт запущен после перезагрузки, это означает, что
-            # systemd должен был запустить вторую фазу. Ждем и проверяем.
-            phase1_cleanup_and_wait
-            ;;
-        *)
-            log "Неизвестное состояние '$current_state'. Начинаем сначала."
-            set_state "initial"
-            main # Рекурсивный вызов для начала с начального состояния
-            ;;
-    esac
-}
+# --- Шаг 9: Получение информации о статусе и открытых портах ---
+log "Сбор информации о установленной панели..."
 
-# --- Запуск ---
-main "$@"
+# Получение статуса службы
+XUI_STATUS=$(systemctl is-active x-ui 2>/dev/null || echo "inactive")
+if [[ "$XUI_STATUS" != "active" ]]; then
+    log_warn "Служба x-ui не активна. Текущий статус: $XUI_STATUS"
+else
+    log_success "Служба x-ui активна."
+fi
+
+# Получение открытых портов (после настройки UFW)
+OPEN_PORTS=$(ufw status numbered 2>/dev/null | grep -E 'ALLOW|DENY|LIMIT' | head -n 10) # Ограничиваем вывод первыми 10 строками
+if [[ -z "$OPEN_PORTS" ]]; then
+    OPEN_PORTS_INFO="Не удалось определить открытые порты или их нет."
+else
+    OPEN_PORTS_INFO="$OPEN_PORTS"
+fi
+
+# --- Шаг 10: Вывод результатов ---
+echo ""
+echo "========================================"
+log_success "Установка и настройка 3x-ui завершена!"
+echo "========================================"
+echo ""
+
+log "Статус службы x-ui: $XUI_STATUS"
+echo ""
+log "Открытые порты (после настройки UFW):"
+echo "$OPEN_PORTS_INFO"
+echo ""
+log "Данные для входа в панель:"
+echo "  URL: https://$(hostname -I | awk '{print $1}'):$WEB_PORT/"
+echo "  Логин: $DB_USERNAME"
+echo "  Пароль: [Пароль был установлен автоматически при установке. Проверьте его в панели после первого входа.]"
+echo ""
+log "Пути к сертификатам:"
+echo "  Приватный ключ: $CERT_KEY_FILE"
+echo "  Сертификат: $CERT_CRT_FILE"
+echo ""
+log "Важно: Так как используется самоподписанный сертификат, ваш браузер может предупредить о риске безопасности. Это нормально для тестовой среды."
+echo "========================================"
+echo ""
+
+log_success "Скрипт выполнен успешно. Пожалуйста, сохраните эти данные для входа в панель."
+
+exit 0
