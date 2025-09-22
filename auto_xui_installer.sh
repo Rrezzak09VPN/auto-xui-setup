@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # auto_xui_installer.sh - Скрипт автоматической установки и настройки 3x-ui
-# Версия: 1.1
+# Версия: 1.2
 # Использование: bash <(curl -Ls https://raw.githubusercontent.com/Rrezzak09VPN/auto-xui-setup/main/auto_xui_installer.sh)
 
 set -e
@@ -91,10 +91,17 @@ if [[ ! -f "$DB_PATH" ]]; then
     exit 1
 fi
 
-if ! sqlite3 "$DB_PATH" "UPDATE settings SET webKeyFile='$CERT_KEY_FILE', webCertFile='$CERT_CRT_FILE';" > /dev/null 2>&1; then
-    log_error "Ошибка при обновлении путей к сертификатам в базе данных."
+# Исправлено: правильные названия полей webCertFile и webKeyFile
+if ! sqlite3 "$DB_PATH" "UPDATE settings SET value='$CERT_CRT_FILE' WHERE key='webCertFile';" > /dev/null 2>&1; then
+    log_error "Ошибка при обновлении пути к файлу сертификата в базе данных."
     exit 1
 fi
+
+if ! sqlite3 "$DB_PATH" "UPDATE settings SET value='$CERT_KEY_FILE' WHERE key='webKeyFile';" > /dev/null 2>&1; then
+    log_error "Ошибка при обновлении пути к файлу ключа в базе данных."
+    exit 1
+fi
+
 log_success "Пути к сертификатам обновлены в базе данных."
 
 # --- Шаг 5: Перезапуск 3x-ui ---
@@ -170,17 +177,36 @@ cp "$BEFORE_RULES_FILE" "${BEFORE_RULES_FILE}.bak_$(date +%Y%m%d_%H%M%S)" > /dev
 # Функция для замены правил ACCEPT на DROP или добавления новых
 replace_or_add_icmp_rules() {
     local section="$1"
-    
-    # Заменяем существующие ACCEPT на DROP
-    sed -i "/^# ok icmp codes for $section/,/^# End of ok icmp codes for $section/ s/-j ACCEPT/-j DROP/g" "$BEFORE_RULES_FILE"
-    
-    # Добавляем source-quench, если его нет (и заменяем ACCEPT на DROP, если он есть)
-    if grep -q "\-\-icmp-type source-quench" "$BEFORE_RULES_FILE"; then
-        sed -i "/--icmp-type source-quench/s/-j ACCEPT/-j DROP/" "$BEFORE_RULES_FILE"
+
+    # Проверяем, существует ли секция
+    if grep -q "^# ok icmp codes for $section" "$BEFORE_RULES_FILE"; then
+        # Заменяем существующие ACCEPT на DROP
+        sed -i "/^# ok icmp codes for $section/,/^# End of ok icmp codes for $section/ s/-j ACCEPT/-j DROP/g" "$BEFORE_RULES_FILE"
     else
-        # Добавляем правило source-quench перед # End of ok icmp codes
-        sed -i "/# End of ok icmp codes for $section/i -A ufw-before-$section -p icmp --icmp-type source-quench -j DROP" "$BEFORE_RULES_FILE"
+        # Если секции нет, создаем её перед # End required lines
+        line_num=$(grep -n "^# End required lines" "$BEFORE_RULES_FILE" | cut -d: -f1)
+        if [[ -n "$line_num" ]]; then
+            sed -i "${line_num}i # ok icmp codes for $section\n# End of ok icmp codes for $section\n" "$BEFORE_RULES_FILE"
+        fi
     fi
+
+    # Добавляем или заменяем правила DROP
+    local rules=(
+        "destination-unreachable"
+        "time-exceeded"
+        "parameter-problem"
+        "echo-request"
+        "source-quench"
+    )
+
+    for rule_type in "${rules[@]}"; do
+        if grep -q "\-\-icmp-type $rule_type" "$BEFORE_RULES_FILE"; then
+            sed -i "/--icmp-type $rule_type/s/-j ACCEPT/-j DROP/" "$BEFORE_RULES_FILE"
+        else
+            # Добавляем правило перед # End of ok icmp codes
+            sed -i "/# End of ok icmp codes for $section/i -A ufw-before-$section -p icmp --icmp-type $rule_type -j DROP" "$BEFORE_RULES_FILE"
+        fi
+    done
 }
 
 replace_or_add_icmp_rules "INPUT"
