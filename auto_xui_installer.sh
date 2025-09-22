@@ -1,8 +1,9 @@
 #!/bin/bash
 
-# Скрипт автоматической установки 3x-ui с перезагрузкой
-# Версия: 1.0
+# Скрипт автоматической установки 3x-ui с надежной перезагрузкой и автозапуском
+# Версия: 2.1
 
+# --- Цвета ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -11,256 +12,298 @@ PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
+# --- Глобальные переменные ---
+SCRIPT_DIR="/root"
+PHASE2_SCRIPT_NAME="xui_phase2_installer.sh"
+PHASE2_SCRIPT_PATH="$SCRIPT_DIR/$PHASE2_SCRIPT_NAME"
+SERVICE_NAME="xui-phase2-install.service"
+SERVICE_FILE_PATH="/etc/systemd/system/$SERVICE_NAME"
+STATE_FILE="/tmp/xui_install_state"
+MARKER_FILE="/tmp/xui_phase2_marker"
+
+# --- Функции логирования ---
 log() {
     echo -e "${GREEN}[INFO]${NC} $1"
 }
 
 warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
+    echo -e "${YELLOW}[WARN]${NC} $1" >&2
 }
 
 error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+    echo -e "${RED}[ERROR]${NC} $1" >&2
+    exit 1
 }
 
 success() {
     echo -e "${CYAN}[SUCCESS]${NC} $1"
 }
 
-# Проверка root прав
+# --- Проверки ---
 check_root() {
     if [[ $EUID -ne 0 ]]; then
         error "Этот скрипт должен быть запущен с правами root"
-        exit 1
     fi
 }
 
-# Функция для ожидания подключения пользователя после перезагрузки
-wait_for_user_connection() {
-    log "Ожидание подключения пользователя после перезагрузки..."
-    log "Пожалуйста, подключитесь к серверу через SSH в течение 5 минут"
-    
-    # Создаем файл-маркер для отслеживания состояния
-    echo "waiting" > /tmp/xui_install_state
-    
-    # Запускаем мониторинг в фоне
-    (
-        sleep 300  # Ждем 5 минут
-        if [ -f /tmp/xui_install_state ]; then
-            echo "timeout" > /tmp/xui_install_state
-        fi
-    ) &
-    
-    # Ждем подключения пользователя
-    while [ -f /tmp/xui_install_state ] && [ "$(cat /tmp/xui_install_state)" = "waiting" ]; do
-        sleep 5
-    done
-    
-    if [ -f /tmp/xui_install_state ] && [ "$(cat /tmp/xui_install_state)" = "timeout" ]; then
-        error "Время ожидания подключения пользователя истекло"
-        rm -f /tmp/xui_install_state
-        exit 1
+check_internet() {
+    log "Проверка подключения к интернету..."
+    if ! ping -c 1 -W 5 8.8.8.8 &> /dev/null && ! ping -c 1 -W 5 1.1.1.1 &> /dev/null; then
+        error "Нет подключения к интернету. Проверьте сетевые настройки."
     fi
-    
-    rm -f /tmp/xui_install_state
-    success "Пользователь подключен, продолжаем установку..."
+    success "Подключение к интернету доступно."
 }
 
-# Функция для проверки, является ли это продолжением после перезагрузки
-is_continuation() {
-    [ -f /tmp/xui_install_continuation ]
+# --- Управление состоянием ---
+get_state() {
+    if [[ -f "$STATE_FILE" ]]; then
+        cat "$STATE_FILE"
+    else
+        echo "initial"
+    fi
 }
 
-# Функция для обновления системы
-update_system() {
-    log "Обновление системы..."
-    
-    # Автоматизируем ответы на возможные вопросы
+set_state() {
+    echo "$1" > "$STATE_FILE"
+}
+
+# --- Этап 1: Обновление системы ---
+phase1_update_system() {
+    log "Этап 1: Обновление системы..."
+    set_state "updating"
+
     export DEBIAN_FRONTEND=noninteractive
-    
-    # Обновляем списки пакетов
-    apt-get update -y
-    
-    # Обновляем все пакеты с автоматическим подтверждением
-    apt-get upgrade -y -o Dpkg::Options::="--force-confold"
-    
-    # Устанавливаем необходимые пакеты
-    apt-get install -y curl wget sqlite3 python3 python3-pip openssl ufw net-tools tzdata
-    
-    # Устанавливаем bcrypt для работы с хэшами
-    pip3 install bcrypt --break-system-packages
-    
+
+    log "Обновление списков пакетов..."
+    apt-get update -y || warn "Не удалось обновить списки пакетов apt"
+
+    log "Обновление установленных пакетов..."
+    apt-get upgrade -y -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" || warn "Не все пакеты были обновлены"
+
+    log "Установка необходимых зависимостей..."
+    apt-get install -y \
+        curl wget sqlite3 openssl ufw net-tools tzdata \
+        python3 python3-pip || error "Не удалось установить базовые зависимости"
+
+    # Безопасная установка bcrypt
+    log "Установка Python bcrypt..."
+    if command -v pip3 &> /dev/null; then
+        pip3 install --user bcrypt --quiet && log "Bcrypt установлен в пользовательскую директорию." && return 0
+        warn "Установка в пользовательскую директорию не удалась, пробуем системную установку..."
+        apt-get install -y python3-bcrypt && log "Bcrypt установлен через apt." && return 0
+        warn "Установка через apt не удалась, пробуем pip с флагом --break-system-packages..."
+        pip3 install bcrypt --break-system-packages --quiet && log "Bcrypt установлен через pip (с флагом --break-system-packages)." && return 0
+    else
+        apt-get install -y python3-bcrypt && log "Bcrypt установлен через apt (pip3 не найден)." && return 0
+    fi
+    error "Не удалось установить Python bcrypt всеми способами."
     success "Система обновлена"
 }
 
-# Функция для перезагрузки системы
-reboot_system() {
-    log "Создание скрипта продолжения установки..."
-    
-    # Создаем скрипт для продолжения после перезагрузки
-    cat > /root/continue_xui_install.sh << 'CONTINUE_EOF'
-#!/bin/bash
-# Скрипт продолжения установки 3x-ui
+# --- Этап 2: Настройка автозапуска продолжения ---
+phase1_setup_autostart() {
+    log "Этап 2: Настройка автозапуска второй фазы..."
 
+    # 1. Создаем скрипт для второй фазы
+    cat > "$PHASE2_SCRIPT_PATH" << 'PHASE2_EOF'
+#!/bin/bash
+set -e
+
+# --- Цвета для второй фазы ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
 CYAN='\033[0;36m'
-NC='\033[0m'
+NC='\033[0m' # No Color
 
+# --- Функции логирования для второй фазы ---
 log() {
-    echo -e "${GREEN}[INFO]${NC} $1"
+    echo -e "${GREEN}[PHASE2]${NC} $1"
 }
 
-success() {
-    echo -e "${CYAN}[SUCCESS]${NC} $1"
+warn() {
+    echo -e "${YELLOW}[PHASE2_WARN]${NC} $1" >&2
 }
 
 error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+    echo -e "${RED}[PHASE2_ERROR]${NC} $1" >&2
+    # Удаляем маркер, чтобы основной скрипт знал об ошибке
+    rm -f /tmp/xui_phase2_marker
+    exit 1
 }
 
-# Помечаем, что это продолжение установки
-echo "continuation" > /tmp/xui_install_continuation
+success() {
+    echo -e "${CYAN}[PHASE2_SUCCESS]${NC} $1"
+}
 
-# Запускаем основной скрипт установки
-log "Продолжаем установку 3x-ui после перезагрузки..."
+# --- Основная логика второй фазы ---
+log "Начало второй фазы установки: Установка 3x-ui и настройка..."
 
-# Скачиваем и запускаем установку 3x-ui
-bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)
+# --- Шаг 1: Установка 3x-ui через официальный скрипт ---
+log "Шаг 1: Запуск официального установщика 3x-ui..."
+bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) || error "Ошибка при запуске официального установщика 3x-ui"
+success "3x-ui успешно установлен через официальный скрипт."
 
-if [ $? -eq 0 ]; then
-    log "3x-ui успешно установлен"
-    
-    # Ждем немного, чтобы сервис запустился
-    sleep 10
-    
-    # Настраиваем SSL и другие параметры
-    log "Настройка SSL сертификатов и других параметров..."
-    
-    # Создаем директорию для SSL
-    mkdir -p /etc/ssl/xui
-    
-    # Генерируем SSL сертификат на 10 лет
-    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-        -keyout /etc/ssl/xui/secret.key \
-        -out /etc/ssl/xui/cert.crt \
-        -subj "/C=US/ST=State/L=City/O=X-UI-Panel/CN=$(hostname -I | awk '{print $1}')" \
-        -addext "subjectAltName=DNS:$(hostname),IP:$(hostname -I | awk '{print $1}')"
-    
-    # Устанавливаем правильные права доступа
+# --- Шаг 2: Ожидание инициализации сервиса ---
+log "Шаг 2: Ожидание инициализации сервиса x-ui..."
+sleep 15
+
+# --- Шаг 3: Генерация и настройка SSL ---
+log "Шаг 3: Генерация SSL-сертификата..."
+mkdir -p /etc/ssl/xui
+
+# Генерируем сертификат на 10 лет
+if openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+    -keyout /etc/ssl/xui/secret.key \
+    -out /etc/ssl/xui/cert.crt \
+    -subj "/C=US/ST=State/L=City/O=X-UI-Panel/CN=$(hostname -I | awk '{print $1}')" \
+    -addext "subjectAltName=DNS:$(hostname),IP:$(hostname -I | awk '{print $1}')" &>/dev/null; then
     chmod 600 /etc/ssl/xui/secret.key
     chmod 644 /etc/ssl/xui/cert.crt
-    
-    # Останавливаем сервис для безопасной работы с БД
-    systemctl stop x-ui
-    
-    # Обновляем пути к SSL сертификатам в базе данных
-    if [ -f /etc/x-ui/x-ui.db ]; then
-        sqlite3 /etc/x-ui/x-ui.db "UPDATE settings SET value = '/etc/ssl/xui/cert.crt' WHERE key = 'webCertFile';"
-        sqlite3 /etc/x-ui/x-ui.db "UPDATE settings SET value = '/etc/ssl/xui/secret.key' WHERE key = 'webKeyFile';"
-        
-        # Генерируем новые случайные данные для доступа
-        USERNAME=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 12)
-        PASSWORD=$(tr -dc 'A-Za-z0-9!@#$%^&*' < /dev/urandom | head -c 16)
-        BASEPATH=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 16)
-        
-        # Генерируем случайный порт
-        PORT=$((RANDOM % 50000 + 10000))
-        while [ $PORT -eq 22 ] || [ $PORT -eq 443 ] || [ $PORT -eq 80 ] || [ $PORT -eq 31228 ]; do
-            PORT=$((RANDOM % 50000 + 10000))
-        done
-        
-        # Получаем соль и генерируем хэш пароля
-        SALT=$(sqlite3 /etc/x-ui/x-ui.db "SELECT password FROM users WHERE id = 1;" | sed 's/\$2a\$10\$//' | cut -c1-22)
-        if [ ! -z "$SALT" ]; then
-            FULL_SALT="\$2a\$10\$${SALT}"
-            
-            HASH=$(python3 -c "
-import bcrypt
-password = '$PASSWORD'
-salt = '$FULL_SALT'.encode('utf-8')
-hashed = bcrypt.hashpw(password.encode('utf-8'), salt)
-print(hashed.decode('utf-8'))
-")
-            
-            # Обновляем данные пользователя
-            sqlite3 /etc/x-ui/x-ui.db "UPDATE users SET username = '$USERNAME', password = '$HASH' WHERE id = 1;"
-        fi
-        
-        # Обновляем настройки панели
-        sqlite3 /etc/x-ui/x-ui.db "UPDATE settings SET value = '/$BASEPATH/' WHERE key = 'webBasePath';"
-        sqlite3 /etc/x-ui/x-ui.db "UPDATE settings SET value = '$PORT' WHERE key = 'webPort';"
-        
-        # Открываем порт в firewall
-        ufw allow $PORT/tcp comment "X-UI Panel"
-        
-        # Запускаем сервис
-        systemctl start x-ui
-        
-        # Выводим данные для доступа
-        echo "=========================================="
-        echo "         X-UI PANEL УСПЕШНО НАСТРОЕН"
-        echo "=========================================="
-        echo "URL: https://$(hostname -I | awk '{print $1}'):$PORT/$BASEPATH/"
-        echo "Username: $USERNAME"
-        echo "Password: $PASSWORD"
-        echo "=========================================="
-        echo "Сохраните эти данные в безопасном месте!"
-        echo "=========================================="
-        
-        success "Установка и настройка завершены успешно!"
-    else
-        error "Файл базы данных не найден. Продолжаем без дополнительной настройки."
-        systemctl start x-ui
-    fi
-    
-    # Удаляем временные файлы
-    rm -f /tmp/xui_install_continuation
-    rm -f /root/continue_xui_install.sh
-    
+    success "SSL-сертификат успешно создан."
 else
-    error "Ошибка установки 3x-ui"
-    exit 1
+    error "Не удалось создать SSL-сертификат."
 fi
-CONTINUE_EOF
 
-    chmod +x /root/continue_xui_install.sh
-    
-    # Добавляем скрипт в автозагрузку
-    echo "@reboot root /root/continue_xui_install.sh && rm -f /root/continue_xui_install.sh" >> /etc/crontab
-    
+# --- Шаг 4: Настройка SSL в 3x-ui ---
+log "Шаг 4: Настройка SSL-сертификатов в 3x-ui..."
+systemctl stop x-ui
+
+# Используем встроенную команду 3x-ui для установки SSL
+if command -v x-ui &> /dev/null; then
+    if x-ui setting -webCertFile "/etc/ssl/xui/cert.crt" -webKeyFile "/etc/ssl/xui/secret.key"; then
+        success "Пути к SSL-сертификатам успешно установлены в 3x-ui."
+    else
+        error "Не удалось установить пути к SSL-сертификатам через команду x-ui."
+    fi
+else
+    error "Команда x-ui не найдена после установки."
+fi
+
+# --- Шаг 5: Перезапуск сервиса ---
+log "Шаг 5: Перезапуск сервиса x-ui..."
+systemctl start x-ui || error "Не удалось запустить сервис x-ui после настройки SSL"
+success "Сервис x-ui перезапущен."
+
+# --- Шаг 6: Вывод финальной информации ---
+log "Шаг 6: Получение финальных настроек..."
+FINAL_SETTINGS=$(/usr/local/x-ui/x-ui setting -show true 2>/dev/null || echo "Ошибка получения финальных настроек")
+echo "=========================================="
+echo "         X-UI PANEL УСПЕШНО НАСТРОЕН"
+echo "=========================================="
+echo "$FINAL_SETTINGS"
+echo "=========================================="
+echo "Сохраните эти данные в безопасном месте!"
+echo "=========================================="
+
+# --- Шаг 7: Очистка ---
+log "Шаг 7: Очистка временных файлов второй фазы..."
+# Создаем маркер успешного завершения
+echo "completed" > /tmp/xui_phase2_marker
+success "Вторая фаза установки завершена успешно!"
+PHASE2_EOF
+
+    chmod +x "$PHASE2_SCRIPT_PATH"
+
+    # 2. Создаем systemd сервис для запуска второй фазы при следующей загрузке
+    cat > "$SERVICE_FILE_PATH" << SERVICE_EOF
+[Unit]
+Description=Continue X-UI Installation After Reboot (Phase 2)
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=$PHASE2_SCRIPT_PATH
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+    # 3. Включаем сервис
+    systemctl daemon-reload
+    systemctl enable "$SERVICE_NAME" || error "Не удалось включить сервис продолжения установки"
+    success "Автозапуск второй фазы настроен. Сервис: $SERVICE_NAME"
+}
+
+# --- Этап 3: Перезагрузка ---
+phase1_reboot() {
+    log "Этап 3: Перезагрузка системы..."
+    set_state "rebooting"
     log "Система будет перезагружена через 10 секунд..."
-    log "ПОСЛЕ ПЕРЕЗАГРУЗКИ ПОЖАЛУЙСТА ПОДКЛЮЧИТЕСЬ К СЕРВЕРУ СНОВА!"
-    log "Скрипт автоматически продолжит установку после вашего подключения"
-    
+    log "ПОСЛЕ ПЕЗАГРУЗКИ ПОЖАЛУЙСТА ПОДКЛЮЧИТЕСЬ К СЕРВЕРУ СНОВА!"
+    log "Скрипт автоматически продолжит установку (фаза 2)."
     sleep 10
     reboot
 }
 
-# Основная функция установки
-main_install() {
-    log "Начало установки 3x-ui..."
+# --- Проверка и завершение ---
+phase1_cleanup_and_wait() {
+    log "Этап 4: Ожидание завершения второй фазы и очистка..."
     
-    # Проверяем, является ли это продолжением после перезагрузки
-    if is_continuation; then
-        log "Обнаружено продолжение установки после перезагрузки"
-        # Удаляем маркер продолжения
-        rm -f /tmp/xui_install_continuation
-        # Продолжаем установку
-        /root/continue_xui_install.sh
+    local wait_time=0
+    local max_wait=300 # 5 минут
+    
+    # Ждем появления маркера завершения второй фазы
+    while [[ ! -f "$MARKER_FILE" ]] && [[ $wait_time -lt $max_wait ]]; do
+        log "Ожидание завершения второй фазы... (${wait_time}s)"
+        sleep 10
+        wait_time=$((wait_time + 10))
+    done
+
+    if [[ -f "$MARKER_FILE" ]] && [[ "$(cat "$MARKER_FILE")" == "completed" ]]; then
+        success "Вторая фаза успешно завершена!"
+        
+        # Очистка: удаляем все временные файлы и сервис
+        log "Очистка временных файлов..."
+        rm -f "$STATE_FILE"
+        rm -f "$MARKER_FILE"
+        rm -f "$PHASE2_SCRIPT_PATH"
+        
+        systemctl disable "$SERVICE_NAME" --now &>/dev/null || true
+        rm -f "$SERVICE_FILE_PATH"
+        systemctl daemon-reload
+        
+        success "Все временные файлы и сервисы очищены."
+        echo "=========================================="
+        echo "         УСТАНОВКА ЗАВЕРШЕНА!"
+        echo "=========================================="
+        echo "Данные для доступа к панели см. выше."
+        echo "=========================================="
     else
-        log "Первичная установка"
-        # Обновляем систему
-        update_system
-        # Перезагружаем систему
-        reboot_system
+        error "Вторая фаза не завершилась в течение 5 минут или завершилась с ошибкой."
     fi
 }
 
-# Проверка root прав
-check_root
+# --- Основной блок выполнения ---
+main() {
+    check_root
+    check_internet
 
-# Запуск основной установки
-main_install
+    local current_state=$(get_state)
+
+    case "$current_state" in
+        "initial"|"updating")
+            log "Начало процесса установки. Текущее состояние: $current_state"
+            phase1_update_system
+            phase1_setup_autostart
+            phase1_reboot
+            ;;
+        "rebooting")
+            log "Обнаружено состояние 'rebooting'. Это неожиданно. Проверьте систему."
+            # Если скрипт запущен после перезагрузки, это означает, что
+            # systemd должен был запустить вторую фазу. Ждем и проверяем.
+            phase1_cleanup_and_wait
+            ;;
+        *)
+            log "Неизвестное состояние '$current_state'. Начинаем сначала."
+            set_state "initial"
+            main # Рекурсивный вызов для начала с начального состояния
+            ;;
+    esac
+}
+
+# --- Запуск ---
+main "$@"
