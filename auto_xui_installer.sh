@@ -1,157 +1,111 @@
 #!/bin/bash
 
 # auto_xui_installer.sh - Скрипт автоматической установки и настройки 3x-ui
-# Версия: 5.0 (Финальная, исправленная)
-# Использование: bash <(curl -Ls https://raw.githubusercontent.com/Rrezzak09VPN/auto-xui-setup/main/auto_xui_installer.sh)
+# Версия: 5.1
 
-# --- Цвета для вывода ---
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
-# --- Функция логирования ---
-log() {
-    echo -e "${BLUE}[INFO]$(date '+%Y-%m-%d %H:%M:%S')${NC} $1"
-}
-
-log_warn() {
-    echo -e "${YELLOW}[WARNING]$(date '+%Y-%m-%d %H:%M:%S')${NC} $1"
-}
-
-log_error() {
-    echo -e "${RED}[ERROR]$(date '+%Y-%m-%d %H:%M:%S')${NC} $1" >&2
-}
-
-log_success() {
-    echo -e "${GREEN}[SUCCESS]$(date '+%Y-%m-%d %H:%M:%S')${NC} $1"
-}
-
-# --- Переменные ---
-DB_PATH="/etc/x-ui/x-ui.db"
+# --- Конфигурация ---
+LOG_FILE="/tmp/xui_install_log.txt" # Временный файл для лога установки
 CERT_DIR="/etc/ssl/xui"
-CERT_KEY_FILE="$CERT_DIR/secret.key"
 CERT_CRT_FILE="$CERT_DIR/cert.crt"
-TEMP_INSTALL_LOG="/tmp/xui_install_output.log"
+CERT_KEY_FILE="$CERT_DIR/secret.key"
+DB_PATH="/etc/x-ui/x-ui.db"
+BEFORE_RULES_FILE="/etc/ufw/before.rules"
+# --------------------
 
-# --- Проверка прав root ---
-if [[ $EUID -ne 0 ]]; then
-   log_error "Этот скрипт должен быть запущен с правами root (sudo)."
-   exit 1
-fi
+# --- Функции логирования ---
+log() { echo "[INFO]$(date '+%Y-%m-%d %H:%M:%S') $1"; }
+log_warn() { echo "[WARNING]$(date '+%Y-%m-%d %H:%M:%S') $1"; }
+log_error() { echo "[ERROR]$(date '+%Y-%m-%d %H:%M:%S') $1" >&2; }
+log_success() { echo "[SUCCESS]$(date '+%Y-%m-%d %H:%M:%S') $1"; }
+# --------------------------
 
-# --- Начало установки ---
 echo "========================================"
 log "Начало автоматической установки и настройки 3x-ui"
 echo "========================================"
 
-# --- Шаг 1: Обновление системы (как указано в ТЗ, хотя пользователь делает это вручную) ---
-log "Обновление системы..."
-apt-get update > /dev/null 2>&1 || log_warn "Не удалось обновить списки пакетов."
-apt-get upgrade -y > /dev/null 2>&1 || log_warn "Не удалось обновить систему."
-log_success "Система обновлена."
+# --- Шаг 1: Проверка root прав ---
+if [[ $EUID -ne 0 ]]; then
+   log_error "Этот скрипт должен быть запущен с правами root."
+   exit 1
+fi
 
-# --- Шаг 2: Установка необходимых зависимостей ---
+# --- Шаг 2: Установка зависимостей ---
 log "Установка необходимых зависимостей..."
-apt-get install -y curl openssl sqlite3 ufw > /dev/null 2>&1 || { log_error "Не удалось установить необходимые зависимости."; exit 1; }
+if ! apt-get update > /dev/null 2>&1 || ! apt-get install -y curl openssl sqlite3 ufw > /dev/null 2>&1; then
+    log_error "Ошибка при установке зависимостей."
+    exit 1
+fi
 log_success "Зависимости установлены."
 
-# --- Шаг 3: Запуск официального скрипта установки 3x-ui с автоматизацией ввода и захватом вывода ---
-# Отвечаем пустой строкой (Enter) на вопрос установщика и сохраняем вывод для извлечения пароля
+# --- Шаг 3: Запуск официального установщика 3x-ui с захватом лога ---
 log "Запуск официального скрипта установки 3x-ui (автоматический режим)..."
-# Удаляем временный файл, если он остался от предыдущих запусков
-rm -f "$TEMP_INSTALL_LOG"
+# Удаляем временный файл, если он существует
+rm -f "$LOG_FILE"
 
-# Запуск установщика с автоматическим вводом и сохранением вывода
-{
-    echo "" # Ответ на "Would you like to customize the Panel Port settings? [y/n]:"
-} | bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) 2>&1 | tee "$TEMP_INSTALL_LOG"
+# Запуск установщика с автоматическим ответом "n" и перенаправлением вывода в файл
+{ echo "n"; } | bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) > "$LOG_FILE" 2>&1
 
-# Проверяем, успешно ли завершился установщик
-# PIPESTATUS[1] - код возврата команды `bash <(...)`
-if [ ${PIPESTATUS[1]} -ne 0 ]; then
-    log_error "Официальный скрипт установки завершился с ошибкой."
-    rm -f "$TEMP_INSTALL_LOG" # Удаляем временный файл в случае ошибки
+# Проверяем код возврата предыдущей команды
+if [ $? -ne 0 ]; then
+    log_error "Ошибка при выполнении официального скрипта установки 3x-ui. Смотрите лог: $LOG_FILE"
+    # Не удаляем лог, чтобы можно было отладить
     exit 1
 fi
 log_success "3x-ui установлен."
 
 # --- Шаг 4: Извлечение учетных данных из лога установки ---
 log "Извлечение учетных данных из лога установки..."
-# Ищем строку с паролем в логе
-PASSWORD_LINE=$(grep -E "^Password: " "$TEMP_INSTALL_LOG")
-if [[ -n "$PASSWORD_LINE" ]]; then
-    # Извлекаем пароль из строки "Password: dfrYuvPlUU"
-    DB_PASSWORD=$(echo "$PASSWORD_LINE" | cut -d' ' -f2)
-else
-    log_warn "Не удалось извлечь пароль из лога установки. Будет показано стандартное сообщение."
-    DB_PASSWORD="[Пароль был сгенерирован установщиком. Проверьте его в панели.]"
+# Инициализируем переменные
+EXTRACTED_USERNAME=""
+EXTRACTED_PASSWORD=""
+EXTRACTED_PORT=""
+EXTRACTED_WEBBASEPATH=""
+EXTRACTED_URL=""
+
+# Используем grep и sed для извлечения
+EXTRACTED_USERNAME=$(grep -oP 'Username:\s*\K\w+' "$LOG_FILE" | head -n 1)
+EXTRACTED_PASSWORD=$(grep -oP 'Password:\s*\K\w+' "$LOG_FILE" | head -n 1)
+EXTRACTED_PORT=$(grep -oP 'Port:\s*\K\d+' "$LOG_FILE" | head -n 1)
+EXTRACTED_WEBBASEPATH=$(grep -oP 'WebBasePath:\s*\K[^[:space:]]+' "$LOG_FILE" | head -n 1)
+EXTRACTED_URL=$(grep -oP 'Access URL:\s*\Khttp[^[:space:]]+' "$LOG_FILE" | head -n 1)
+
+if [[ -z "$EXTRACTED_USERNAME" || -z "$EXTRACTED_PASSWORD" || -z "$EXTRACTED_PORT" || -z "$EXTRACTED_WEBBASEPATH" ]]; then
+    log_error "Не удалось извлечь все учетные данные из лога установки."
+    log "Проверьте лог установки: $LOG_FILE"
+    # Не удаляем лог при ошибке
+    exit 1
 fi
 
-# Удаляем временный файл
-rm -f "$TEMP_INSTALL_LOG"
+log "Учетные данные успешно извлечены из лога."
+# Удаляем временный файл лога установки
+rm -f "$LOG_FILE"
+log "Временный файл лога установки удален."
 
-# --- Шаг 5: Ожидание инициализации сервиса и БД ---
+# --- Шаг 5: Ожидание инициализации сервиса и базы данных ---
 log "Ожидание инициализации сервиса и базы данных..."
+sleep 5 # Даем сервису время стартовать и создать БД
 
-# Функция для ожидания готовности БД
-wait_for_db() {
-    local retries=30
-    local count=0
-    while [[ $count -lt $retries ]]; do
-        if [[ -f "$DB_PATH" ]] && sqlite3 "$DB_PATH" "SELECT 1 FROM settings LIMIT 1;" > /dev/null 2>&1; then
-            log_success "База данных готова."
-            return 0
-        fi
-        log_warn "База данных еще не готова, повторная проверка через 2 секунды... ($((count+1))/$retries)"
-        sleep 2
-        ((count++))
-    done
-    return 1
-}
-
-if ! wait_for_db; then
-    log_error "База данных не стала доступна после попыток ожидания. Прерывание."
+# Ожидание появления файла БД
+for i in {1..30}; do
+    if [[ -f "$DB_PATH" ]]; then
+        log_success "База данных готова."
+        break
+    fi
+    sleep 1
+done
+if [[ ! -f "$DB_PATH" ]]; then
+    log_error "Файл базы данных $DB_PATH не появился в течение ожидания."
     exit 1
 fi
 
-# --- Шаг 6: Чтение реальных учетных данных из БД ---
-log "Чтение сгенерированных учетных данных из базы данных..."
-WEB_PORT=""
-DB_USERNAME=""
-
-# Получаем порт и имя пользователя из таблицы settings
-WEB_PORT=$(sqlite3 "$DB_PATH" "SELECT value FROM settings WHERE key='webPort';" 2>/dev/null)
-DB_USERNAME=$(sqlite3 "$DB_PATH" "SELECT value FROM settings WHERE key='username';" 2>/dev/null)
-
-# Если по какой-то причине не нашли в settings, пробуем получить из users (админ по умолчанию)
-if [[ -z "$DB_USERNAME" ]]; then
-     DB_USERNAME=$(sqlite3 "$DB_PATH" "SELECT username FROM users LIMIT 1;" 2>/dev/null)
-fi
-
-# Проверки
-if [[ -z "$WEB_PORT" ]] || ! [[ "$WEB_PORT" =~ ^[0-9]+$ ]]; then
-    log_error "Не удалось получить порт панели из БД. Установка прервана."
-    exit 1
-fi
-
-if [[ -z "$DB_USERNAME" ]]; then
-    log_error "Не удалось получить имя пользователя из БД. Установка прервана."
-    exit 1
-fi
-
-log "Прочитано из БД: Порт=$WEB_PORT, Пользователь=$DB_USERNAME"
-
-# --- Шаг 7: Генерация SSL сертификата ---
+# --- Шаг 6: Генерация SSL сертификата ---
 log "Генерация самоподписанного SSL сертификата..."
-mkdir -p $CERT_DIR
+mkdir -p "$CERT_DIR"
 SERVER_IP=$(hostname -I | awk '{print $1}')
 if [[ -z "$SERVER_IP" ]]; then
     log_warn "Не удалось автоматически определить IP-адрес сервера. Используется localhost для сертификата."
     SERVER_IP="localhost"
 fi
-
 if ! openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
     -keyout "$CERT_KEY_FILE" \
     -out "$CERT_CRT_FILE" \
@@ -160,32 +114,29 @@ if ! openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
     log_error "Ошибка при генерации SSL сертификата."
     exit 1
 fi
-
 chmod 600 "$CERT_KEY_FILE"
 chmod 644 "$CERT_CRT_FILE"
 log_success "SSL сертификат сгенерирован и сохранен в $CERT_DIR."
 
-# --- Шаг 8: Настройка путей к сертификатам в БД ---
+# --- Шаг 7: Обновление путей к сертификатам в БД ---
 log "Обновление путей к сертификатам в настройках 3x-ui..."
-if [[ ! -f "$DB_PATH" ]]; then
-    log_error "Файл базы данных 3x-ui не найден по пути $DB_PATH."
+# Проверяем, существуют ли записи в settings, если нет - вставляем
+if ! sqlite3 "$DB_PATH" "SELECT 1 FROM settings WHERE key = 'webCertFile' LIMIT 1;" &>/dev/null; then
+    sqlite3 "$DB_PATH" "INSERT OR IGNORE INTO settings (key, value) VALUES ('webCertFile', '$CERT_CRT_FILE');"
+fi
+if ! sqlite3 "$DB_PATH" "SELECT 1 FROM settings WHERE key = 'webKeyFile' LIMIT 1;" &>/dev/null; then
+    sqlite3 "$DB_PATH" "INSERT OR IGNORE INTO settings (key, value) VALUES ('webKeyFile', '$CERT_KEY_FILE');"
+fi
+# Обновляем значения
+if sqlite3 "$DB_PATH" "UPDATE settings SET value = '$CERT_CRT_FILE' WHERE key = 'webCertFile';" && \
+   sqlite3 "$DB_PATH" "UPDATE settings SET value = '$CERT_KEY_FILE' WHERE key = 'webKeyFile';"; then
+    log_success "Пути к сертификатам обновлены в базе данных."
+else
+    log_error "Ошибка при обновлении путей к сертификатам в базе данных."
     exit 1
 fi
 
-# Используем INSERT OR REPLACE для надежности
-if ! sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO settings (key, value) VALUES ('webCertFile', '$CERT_CRT_FILE');" > /dev/null 2>&1; then
-    log_error "Ошибка при обновлении пути к файлу сертификата в базе данных."
-    exit 1
-fi
-
-if ! sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO settings (key, value) VALUES ('webKeyFile', '$CERT_KEY_FILE');" > /dev/null 2>&1; then
-    log_error "Ошибка при обновлении пути к файлу ключа в базе данных."
-    exit 1
-fi
-
-log_success "Пути к сертификатам обновлены в базе данных."
-
-# --- Шаг 9: Перезапуск 3x-ui ---
+# --- Шаг 8: Перезапуск 3x-ui ---
 log "Перезапуск службы 3x-ui для применения настроек сертификата..."
 if ! systemctl restart x-ui > /dev/null 2>&1; then
     log_error "Ошибка при перезапуске службы x-ui."
@@ -194,136 +145,72 @@ fi
 sleep 3 # Даем сервису время перезапуститься
 log_success "Служба 3x-ui перезапущена."
 
-# --- Шаг 10: Настройка UFW (фаерволл) ---
-log "Настройка UFW: открытие нужных портов и закрытие остальных..."
-
-# Сброс правил для чистой конфигурации
-ufw --force reset > /dev/null 2>&1
-
-# Открытие необходимых портов
-ufw allow 22/tcp > /dev/null 2>&1 || log_warn "Не удалось открыть порт 22 (SSH)."
-ufw allow 443/tcp > /dev/null 2>&1 || log_warn "Не удалось открыть порт 443 (HTTPS)."
-ufw allow $WEB_PORT/tcp > /dev/null 2>&1 || log_warn "Не удалось открыть порт $WEB_PORT (Панель 3x-ui)."
-
-# Запрет всех остальных входящих соединений по умолчанию
-ufw default deny incoming > /dev/null 2>&1 || log_warn "Не удалось установить правило запрета входящих по умолчанию."
-
-# Разрешение всех исходящих соединений по умолчанию
-ufw default allow outgoing > /dev/null 2>&1 || log_warn "Не удалось установить правило разрешения исходящих по умолчанию."
-
-# Перезагрузка UFW для применения всех правил
-ufw --force reload > /dev/null 2>&1 || log_warn "Не удалось перезагрузить UFW после настройки портов."
-
-# Явное включение UFW
-echo "y" | ufw enable > /dev/null 2>&1 || { log_error "Не удалось включить UFW."; exit 1; }
-
-# Проверка статуса UFW
-if ufw status | grep -q "Status: active"; then
+# --- Шаг 9: Настройка UFW ---
+log "Настройка UFW: открытие нужных портов..."
+# Открываем SSH, HTTPS и порт панели
+if ufw allow 22/tcp > /dev/null 2>&1 && \
+   ufw allow 443/tcp > /dev/null 2>&1 && \
+   ufw allow "$EXTRACTED_PORT"/tcp > /dev/null 2>&1 && \
+   ufw --force enable > /dev/null 2>&1; then
     log_success "UFW настроен и включен."
 else
-    log_error "UFW не активен после настройки. Прерывание."
+    log_error "Ошибка при настройке UFW."
     exit 1
 fi
 
-# --- Шаг 11: Блокировка ICMP в UFW ---
+# --- Шаг 10: Блокировка ICMP (ping) ---
 log "Блокировка ICMP (ping) запросов..."
-BEFORE_RULES_FILE="/etc/ufw/before.rules"
+# Правила для INPUT
+if grep -q "# ok icmp codes for INPUT" "$BEFORE_RULES_FILE"; then
+    # Заменяем ACCEPT на DROP для существующих правил INPUT
+    sed -i '/# ok icmp codes for INPUT/,/^[^#]/ s/-j ACCEPT/-j DROP/g' "$BEFORE_RULES_FILE"
+    # Удаляем возможные дубликаты source-quench, если они были добавлены ранее (на случай повторного запуска)
+    sed -i '/# ok icmp codes for INPUT/,/^[^#]/ {/source-quench/d;}' "$BEFORE_RULES_FILE"
+    # Добавляем правило source-quench в конец секции INPUT
+    sed -i '/# ok icmp codes for INPUT/,/^[^#]/ { /^[^#]/i\-A ufw-before-input -p icmp --icmp-type source-quench -j DROP' "$BEFORE_RULES_FILE"
+else
+    log_warn "Секция '# ok icmp codes for INPUT' не найдена в $BEFORE_RULES_FILE. Пропуск настройки ICMP INPUT."
+fi
 
-# Создание резервной копии
-cp "$BEFORE_RULES_FILE" "${BEFORE_RULES_FILE}.bak_$(date +%Y%m%d_%H%M%S)" > /dev/null 2>&1 || log_warn "Не удалось создать резервную копию $BEFORE_RULES_FILE."
+# Перезагружаем UFW, чтобы применить изменения в before.rules
+if ufw reload > /dev/null 2>&1; then
+    log_success "ICMP (ping) запросы заблокированы."
+else
+    log_error "Ошибка при перезагрузке UFW для применения правил ICMP."
+    # Не завершаем с ошибкой, так как основная функциональность может работать
+fi
 
-# Функция для замены или добавления правил DROP для ICMP
-block_icmp_types() {
-    local section="$1"
-    # Исправлено имя секции для FORWARD
-    local section_header=""
-    if [[ "$section" == "INPUT" ]]; then
-        section_header="# ok icmp codes for INPUT"
-    elif [[ "$section" == "FORWARD" ]]; then
-        # В Ubuntu по умолчанию может быть "code" без "s"
-        section_header="# ok icmp code for FORWARD"
-    else
-        log_error "Неподдерживаемая секция для ICMP: $section"
-        return 1
-    fi
-
-    local types=("destination-unreachable" "time-exceeded" "parameter-problem" "echo-request" "source-quench")
-
-    # Проверяем, существует ли секция
-    if ! grep -q "^$section_header" "$BEFORE_RULES_FILE"; then
-         log_error "Секция '$section_header' не найдена в $BEFORE_RULES_FILE. Пропуск настройки ICMP для этой секции."
-         return 1
-    fi
-
-    for type in "${types[@]}"; do
-        # Проверяем, есть ли правило для этого типа
-        if grep -q "\-\-icmp-type $type" "$BEFORE_RULES_FILE"; then
-            # Заменяем ACCEPT на DROP
-            sed -i "/--icmp-type $type/s/-j ACCEPT/-j DROP/" "$BEFORE_RULES_FILE"
-        else
-            # Добавляем правило DROP перед # End of ok icmp codes
-            # Находим строку окончания секции
-            end_marker="# End of ok icmp codes for $section"
-            if [[ "$section" == "FORWARD" ]]; then
-                 # Для FORWARD может быть другая строка окончания, проверим стандартную
-                 if grep -q "# End required lines" "$BEFORE_RULES_FILE"; then
-                     end_marker="# End required lines"
-                 fi
-            fi
-            sed -i "/$section_header/,/$end_marker/ { /$end_marker/i -A ufw-before-$section -p icmp --icmp-type $type -j DROP }" "$BEFORE_RULES_FILE"
-        fi
-    done
-}
-
-block_icmp_types "INPUT"
-block_icmp_types "FORWARD"
-
-# Перезагрузка UFW для применения изменений в before.rules
-ufw --force reload > /dev/null 2>&1 || log_warn "Не удалось перезагрузить UFW после изменения ICMP правил."
-log_success "ICMP (ping) запросы заблокированы."
-
-# --- Шаг 12: Получение информации о статусе и открытых портах ---
+# --- Шаг 11: Сбор информации ---
 log "Сбор информации о установленной панели..."
-
-# Получение статуса службы
-XUI_STATUS=$(systemctl is-active x-ui 2>/dev/null || echo "inactive")
-if [[ "$XUI_STATUS" != "active" ]]; then
-    log_warn "Служба x-ui не активна. Текущий статус: $XUI_STATUS"
+# Проверка статуса сервиса
+if systemctl is-active --quiet x-ui; then
+    SERVICE_STATUS="active"
 else
-    log_success "Служба x-ui активна."
+    SERVICE_STATUS="inactive"
 fi
 
-# Получение открытых портов (после настройки UFW)
-# Используем более надежную команду
-UFW_STATUS_OUTPUT=$(ufw status verbose 2>/dev/null)
-if [[ -z "$UFW_STATUS_OUTPUT" ]] || echo "$UFW_STATUS_OUTPUT" | grep -q "Status: inactive"; then
-    OPEN_PORTS_INFO="UFW не активен или не настроен."
-else
-    # Извлекаем только строки с правилами
-    OPEN_PORTS=$(echo "$UFW_STATUS_OUTPUT" | grep -E 'ALLOW|LIMIT' | head -n 10)
-    if [[ -z "$OPEN_PORTS" ]]; then
-        OPEN_PORTS_INFO="Правила UFW настроены, но открытых портов не обнаружено (возможно, все заблокированы по умолчанию)."
-    else
-        OPEN_PORTS_INFO="$OPEN_PORTS"
-    fi
+# Получение открытых портов из UFW
+OPEN_PORTS_INFO=$(ufw status numbered 2>/dev/null | grep -E "(ALLOW IN|DENY IN)" | head -n 10) # Ограничиваем вывод первыми 10 строками
+if [[ -z "$OPEN_PORTS_INFO" ]]; then
+    OPEN_PORTS_INFO="Не удалось получить список открытых портов или список пуст."
 fi
 
-# --- Шаг 13: Вывод результатов ---
-echo ""
-echo "========================================"
+# Формирование корректного URL (используем извлеченные данные)
+# Убираем ведущий слэш из webBasePath, если он есть, чтобы избежать двойного слэша
+FORMATTED_WEBBASEPATH=$(echo "$EXTRACTED_WEBBASEPATH" | sed 's|^/||')
+FINAL_PANEL_URL="https://$(hostname -I | awk '{print $1}'):$EXTRACTED_PORT/$FORMATTED_WEBBASEPATH"
+
 log_success "Установка и настройка 3x-ui завершена!"
 echo "========================================"
-echo ""
-
-log "Статус службы x-ui: $XUI_STATUS"
+log "Статус службы x-ui: $SERVICE_STATUS"
 echo ""
 log "Открытые порты (после настройки UFW):"
 echo "$OPEN_PORTS_INFO"
 echo ""
 log "Данные для входа в панель:"
-echo "  URL: https://$(hostname -I | awk '{print $1}'):$WEB_PORT/"
-echo "  Логин: $DB_USERNAME"
-echo "  Пароль: $DB_PASSWORD"
+echo "  URL: $FINAL_PANEL_URL"
+echo "  Логин: $EXTRACTED_USERNAME"
+echo "  Пароль: $EXTRACTED_PASSWORD"
 echo ""
 log "Пути к сертификатам:"
 echo "  Приватный ключ: $CERT_KEY_FILE"
@@ -331,10 +218,5 @@ echo "  Сертификат: $CERT_CRT_FILE"
 echo ""
 log "Важно: Так как используется самоподписанный сертификат, ваш браузер может предупредить о риске безопасности. Это нормально для тестовой среды."
 echo "========================================"
-echo ""
-
 log_success "Скрипт выполнен успешно."
-log "UFW настроен на автозапуск при загрузке системы (команда 'ufw enable')."
-log "Скрипт не оставил после себя никаких временных файлов."
-
 exit 0
