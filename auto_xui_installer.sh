@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # auto_xui_installer.sh - Скрипт автоматической установки и настройки 3x-ui
-# Версия: 5.1
+# Версия: 5.2
 
 # --- Конфигурация ---
 LOG_FILE="/tmp/xui_install_log.txt" # Временный файл для лога установки
@@ -31,7 +31,7 @@ fi
 
 # --- Шаг 2: Установка зависимостей ---
 log "Установка необходимых зависимостей..."
-if ! apt-get update > /dev/null 2>&1 || ! apt-get install -y curl openssl sqlite3 ufw > /dev/null 2>&1; then
+if ! apt-get update > /dev/null 2>&1 || ! apt-get install -y curl openssl sqlite3 ufw net-tools > /dev/null 2>&1; then
     log_error "Ошибка при установке зависимостей."
     exit 1
 fi
@@ -43,10 +43,11 @@ log "Запуск официального скрипта установки 3x-
 rm -f "$LOG_FILE"
 
 # Запуск установщика с автоматическим ответом "n" и перенаправлением вывода в файл
-{ echo "n"; } | bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) > "$LOG_FILE" 2>&1
+# Используем tee, чтобы вывод шел и на экран, и в файл
+{ echo "n"; } | bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) 2>&1 | tee "$LOG_FILE"
 
-# Проверяем код возврата предыдущей команды
-if [ $? -ne 0 ]; then
+# Проверяем код возврата предыдущей команды (через PIPESTATUS[0] из-за tee)
+if [ ${PIPESTATUS[0]} -ne 0 ]; then
     log_error "Ошибка при выполнении официального скрипта установки 3x-ui. Смотрите лог: $LOG_FILE"
     # Не удаляем лог, чтобы можно было отладить
     exit 1
@@ -120,16 +121,9 @@ log_success "SSL сертификат сгенерирован и сохране
 
 # --- Шаг 7: Обновление путей к сертификатам в БД ---
 log "Обновление путей к сертификатам в настройках 3x-ui..."
-# Проверяем, существуют ли записи в settings, если нет - вставляем
-if ! sqlite3 "$DB_PATH" "SELECT 1 FROM settings WHERE key = 'webCertFile' LIMIT 1;" &>/dev/null; then
-    sqlite3 "$DB_PATH" "INSERT OR IGNORE INTO settings (key, value) VALUES ('webCertFile', '$CERT_CRT_FILE');"
-fi
-if ! sqlite3 "$DB_PATH" "SELECT 1 FROM settings WHERE key = 'webKeyFile' LIMIT 1;" &>/dev/null; then
-    sqlite3 "$DB_PATH" "INSERT OR IGNORE INTO settings (key, value) VALUES ('webKeyFile', '$CERT_KEY_FILE');"
-fi
-# Обновляем значения
-if sqlite3 "$DB_PATH" "UPDATE settings SET value = '$CERT_CRT_FILE' WHERE key = 'webCertFile';" && \
-   sqlite3 "$DB_PATH" "UPDATE settings SET value = '$CERT_KEY_FILE' WHERE key = 'webKeyFile';"; then
+# Используем INSERT OR REPLACE для надежного создания/обновления записей
+if sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO settings (key, value) VALUES ('webCertFile', '$CERT_CRT_FILE');" && \
+   sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO settings (key, value) VALUES ('webKeyFile', '$CERT_KEY_FILE');" ; then
     log_success "Пути к сертификатам обновлены в базе данных."
 else
     log_error "Ошибка при обновлении путей к сертификатам в базе данных."
@@ -142,8 +136,23 @@ if ! systemctl restart x-ui > /dev/null 2>&1; then
     log_error "Ошибка при перезапуске службы x-ui."
     exit 1
 fi
-sleep 3 # Даем сервису время перезапуститься
-log_success "Служба 3x-ui перезапущена."
+sleep 5 # Даем сервису время перезапуститься
+log "Ожидание запуска HTTPS..."
+# Проверяем лог сервиса на предмет запуска HTTPS
+HTTPS_STARTED=false
+for i in {1..20}; do
+    if journalctl -u x-ui -n 10 --no-pager | grep -q "Web server running HTTPS"; then
+        log_success "Сервис x-ui запущен с HTTPS."
+        HTTPS_STARTED=true
+        break
+    fi
+    sleep 2
+done
+if [ "$HTTPS_STARTED" = false ]; then
+    log_warn "Не удалось подтвердить запуск HTTPS в логах x-ui. Проверьте 'journalctl -u x-ui'. Сервис может использовать HTTP или иметь ошибки конфигурации SSL."
+    # Продолжаем выполнение, так как основная установка завершена
+fi
+
 
 # --- Шаг 9: Настройка UFW ---
 log "Настройка UFW: открытие нужных портов..."
@@ -161,20 +170,47 @@ fi
 # --- Шаг 10: Блокировка ICMP (ping) ---
 log "Блокировка ICMP (ping) запросов..."
 # Правила для INPUT
+# Сначала заменяем ACCEPT на DROP для существующих правил INPUT (учитываем оба варианта названия секции)
 if grep -q "# ok icmp codes for INPUT" "$BEFORE_RULES_FILE"; then
-    # Заменяем ACCEPT на DROP для существующих правил INPUT
     sed -i '/# ok icmp codes for INPUT/,/^[^#]/ s/-j ACCEPT/-j DROP/g' "$BEFORE_RULES_FILE"
-    # Удаляем возможные дубликаты source-quench, если они были добавлены ранее (на случай повторного запуска)
-    sed -i '/# ok icmp codes for INPUT/,/^[^#]/ {/source-quench/d;}' "$BEFORE_RULES_FILE"
-    # Добавляем правило source-quench в конец секции INPUT
-    sed -i '/# ok icmp codes for INPUT/,/^[^#]/ { /^[^#]/i\-A ufw-before-input -p icmp --icmp-type source-quench -j DROP' "$BEFORE_RULES_FILE"
+elif grep -q "# ok icmp code for INPUT" "$BEFORE_RULES_FILE"; then
+    sed -i '/# ok icmp code for INPUT/,/^[^#]/ s/-j ACCEPT/-j DROP/g' "$BEFORE_RULES_FILE"
 else
-    log_warn "Секция '# ok icmp codes for INPUT' не найдена в $BEFORE_RULES_FILE. Пропуск настройки ICMP INPUT."
+    log_warn "Стандартная секция INPUT ICMP не найдена в $BEFORE_RULES_FILE. Пропуск замены ACCEPT на DROP для INPUT."
+fi
+
+# Добавляем правило source-quench в INPUT, если его нет
+if grep -q "# ok icmp codes for INPUT" "$BEFORE_RULES_FILE" || grep -q "# ok icmp code for INPUT" "$BEFORE_RULES_FILE"; then
+    # Проверяем, существует ли правило уже
+    if ! grep -q "\-A ufw-before-input -p icmp --icmp-type source-quench -j DROP" "$BEFORE_RULES_FILE"; then
+        # Определяем правильное имя секции для добавления
+        SECTION_HEADER="# ok icmp codes for INPUT"
+        if grep -q "# ok icmp code for INPUT" "$BEFORE_RULES_FILE"; then
+            SECTION_HEADER="# ok icmp code for INPUT"
+        fi
+        # Добавляем правило в конец секции INPUT
+        sed -i "/$SECTION_HEADER/,/^[^#]/ { /^[^#]*--icmp-type [a-z-]* -j DROP$/a\\-A ufw-before-input -p icmp --icmp-type source-quench -j DROP" -e '}' "$BEFORE_RULES_FILE"
+        # Исправление потенциальной ошибки форматирования от sed
+        sed -i '/-A ufw-before-input -p icmp --icmp-type source-quench -j DROP$/!b;n;/^$/d' "$BEFORE_RULES_FILE"
+    else
+         log "Правило source-quench уже существует в INPUT."
+    fi
+else
+    log_warn "Секция '# ok icmp codes/code for INPUT' не найдена в $BEFORE_RULES_FILE. Пропуск добавления правила source-quench для INPUT."
+fi
+
+# Правила для FORWARD (только замена ACCEPT на DROP, без добавления source-quench)
+if grep -q "# ok icmp codes for FORWARD" "$BEFORE_RULES_FILE"; then
+    sed -i '/# ok icmp codes for FORWARD/,/^[^#]/ s/-j ACCEPT/-j DROP/g' "$BEFORE_RULES_FILE"
+elif grep -q "# ok icmp code for FORWARD" "$BEFORE_RULES_FILE"; then
+    sed -i '/# ok icmp code for FORWARD/,/^[^#]/ s/-j ACCEPT/-j DROP/g' "$BEFORE_RULES_FILE"
+else
+    log_warn "Стандартная секция FORWARD ICMP не найдена в $BEFORE_RULES_FILE. Пропуск замены ACCEPT на DROP для FORWARD."
 fi
 
 # Перезагружаем UFW, чтобы применить изменения в before.rules
 if ufw reload > /dev/null 2>&1; then
-    log_success "ICMP (ping) запросы заблокированы."
+    log_success "ICMP (ping) запросы заблокированы (ufw reloaded)."
 else
     log_error "Ошибка при перезагрузке UFW для применения правил ICMP."
     # Не завершаем с ошибкой, так как основная функциональность может работать
