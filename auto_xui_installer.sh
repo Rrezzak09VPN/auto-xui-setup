@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # auto_xui_installer.sh - Скрипт автоматической установки и настройки 3x-ui
-# Версия: 5.2
+# Версия: 5.3
 
 # --- Конфигурация ---
-LOG_FILE="/tmp/xui_install_log.txt" # Временный файл для лога установки
+LOG_FILE="/tmp/xui_install_log_$(date +%s).txt" # Временный файл для лога установки с уникальным именем
 CERT_DIR="/etc/ssl/xui"
 CERT_CRT_FILE="$CERT_DIR/cert.crt"
 CERT_KEY_FILE="$CERT_DIR/secret.key"
@@ -39,16 +39,18 @@ log_success "Зависимости установлены."
 
 # --- Шаг 3: Запуск официального установщика 3x-ui с захватом лога ---
 log "Запуск официального скрипта установки 3x-ui (автоматический режим)..."
-# Удаляем временный файл, если он существует
+# Удаляем временный файл, если он существует (на всякий случай)
 rm -f "$LOG_FILE"
 
-# Запуск установщика с автоматическим ответом "n" и перенаправлением вывода в файл
-# Используем tee, чтобы вывод шел и на экран, и в файл
-{ echo "n"; } | bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) 2>&1 | tee "$LOG_FILE"
+# Запуск установщика с автоматическим ответом "n" и перенаправлением вывода в файл и на экран
+# Используем process substitution и tee для надежного захвата
+exec 3< <({ echo "n"; } | bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh))
+tee "$LOG_FILE" <&3
+INSTALLER_EXIT_CODE=${PIPESTATUS[1]} # Получаем код возврата установщика
+exec 3<&- # Закрываем дескриптор
 
-# Проверяем код возврата предыдущей команды (через PIPESTATUS[0] из-за tee)
-if [ ${PIPESTATUS[0]} -ne 0 ]; then
-    log_error "Ошибка при выполнении официального скрипта установки 3x-ui. Смотрите лог: $LOG_FILE"
+if [ $INSTALLER_EXIT_CODE -ne 0 ]; then
+    log_error "Ошибка при выполнении официального скрипта установки 3x-ui (код $INSTALLER_EXIT_CODE). Смотрите лог: $LOG_FILE"
     # Не удаляем лог, чтобы можно было отладить
     exit 1
 fi
@@ -78,7 +80,7 @@ if [[ -z "$EXTRACTED_USERNAME" || -z "$EXTRACTED_PASSWORD" || -z "$EXTRACTED_POR
 fi
 
 log "Учетные данные успешно извлечены из лога."
-# Удаляем временный файл лога установки
+# Удаляем временный файл лога установки сразу после использования
 rm -f "$LOG_FILE"
 log "Временный файл лога установки удален."
 
@@ -153,7 +155,6 @@ if [ "$HTTPS_STARTED" = false ]; then
     # Продолжаем выполнение, так как основная установка завершена
 fi
 
-
 # --- Шаг 9: Настройка UFW ---
 log "Настройка UFW: открытие нужных портов..."
 # Открываем SSH, HTTPS и порт панели
@@ -167,46 +168,77 @@ else
     exit 1
 fi
 
-# --- Шаг 10: Блокировка ICMP (ping) ---
-log "Блокировка ICMP (ping) запросов..."
-# Правила для INPUT
-# Сначала заменяем ACCEPT на DROP для существующих правил INPUT (учитываем оба варианта названия секции)
-if grep -q "# ok icmp codes for INPUT" "$BEFORE_RULES_FILE"; then
-    sed -i '/# ok icmp codes for INPUT/,/^[^#]/ s/-j ACCEPT/-j DROP/g' "$BEFORE_RULES_FILE"
-elif grep -q "# ok icmp code for INPUT" "$BEFORE_RULES_FILE"; then
-    sed -i '/# ok icmp code for INPUT/,/^[^#]/ s/-j ACCEPT/-j DROP/g' "$BEFORE_RULES_FILE"
-else
-    log_warn "Стандартная секция INPUT ICMP не найдена в $BEFORE_RULES_FILE. Пропуск замены ACCEPT на DROP для INPUT."
-fi
+# --- Шаг 10: Блокировка ICMP (ping) - Идемпотентная настройка ---
+log "Блокировка ICMP (ping) запросов (идемпотентная настройка)..."
 
-# Добавляем правило source-quench в INPUT, если его нет
-if grep -q "# ok icmp codes for INPUT" "$BEFORE_RULES_FILE" || grep -q "# ok icmp code for INPUT" "$BEFORE_RULES_FILE"; then
-    # Проверяем, существует ли правило уже
-    if ! grep -q "\-A ufw-before-input -p icmp --icmp-type source-quench -j DROP" "$BEFORE_RULES_FILE"; then
-        # Определяем правильное имя секции для добавления
-        SECTION_HEADER="# ok icmp codes for INPUT"
-        if grep -q "# ok icmp code for INPUT" "$BEFORE_RULES_FILE"; then
-            SECTION_HEADER="# ok icmp code for INPUT"
-        fi
-        # Добавляем правило в конец секции INPUT
-        sed -i "/$SECTION_HEADER/,/^[^#]/ { /^[^#]*--icmp-type [a-z-]* -j DROP$/a\\-A ufw-before-input -p icmp --icmp-type source-quench -j DROP" -e '}' "$BEFORE_RULES_FILE"
-        # Исправление потенциальной ошибки форматирования от sed
-        sed -i '/-A ufw-before-input -p icmp --icmp-type source-quench -j DROP$/!b;n;/^$/d' "$BEFORE_RULES_FILE"
+# Функция для безопасной замены ACCEPT на DROP в секции ICMP
+safe_replace_accept_in_section() {
+    local section_header="$1"
+    if grep -q "^$section_header" "$BEFORE_RULES_FILE"; then
+        # Создаем временную копию файла
+        local temp_file=$(mktemp)
+        # Копируем файл, заменяя ACCEPT на DROP только в пределах секции
+        awk -v sec="$section_header" '
+        BEGIN { in_section=0 }
+        $0 ~ "^" sec { in_section=1; print; next }
+        in_section && /^[^#]/ { gsub(/-j ACCEPT/, "-j DROP"); print; next }
+        in_section && /^#/ { in_section=0; print; next }
+        !in_section { print }
+        ' "$BEFORE_RULES_FILE" > "$temp_file"
+        # Заменяем оригинальный файл
+        mv "$temp_file" "$BEFORE_RULES_FILE"
+        log "Заменены правила ACCEPT->DROP в секции '$section_header'."
     else
-         log "Правило source-quench уже существует в INPUT."
+        log_warn "Секция '$section_header' не найдена в $BEFORE_RULES_FILE."
     fi
-else
-    log_warn "Секция '# ok icmp codes/code for INPUT' не найдена в $BEFORE_RULES_FILE. Пропуск добавления правила source-quench для INPUT."
-fi
+}
 
-# Правила для FORWARD (только замена ACCEPT на DROP, без добавления source-quench)
-if grep -q "# ok icmp codes for FORWARD" "$BEFORE_RULES_FILE"; then
-    sed -i '/# ok icmp codes for FORWARD/,/^[^#]/ s/-j ACCEPT/-j DROP/g' "$BEFORE_RULES_FILE"
-elif grep -q "# ok icmp code for FORWARD" "$BEFORE_RULES_FILE"; then
-    sed -i '/# ok icmp code for FORWARD/,/^[^#]/ s/-j ACCEPT/-j DROP/g' "$BEFORE_RULES_FILE"
-else
-    log_warn "Стандартная секция FORWARD ICMP не найдена в $BEFORE_RULES_FILE. Пропуск замены ACCEPT на DROP для FORWARD."
-fi
+# Функция для безопасного добавления правила source-quench, если его нет
+safe_add_source_quench() {
+    local rule="-A ufw-before-input -p icmp --icmp-type source-quench -j DROP"
+    # Проверяем, существует ли правило уже (точное совпадение)
+    if grep -qF "$rule" "$BEFORE_RULES_FILE"; then
+        log "Правило source-quench уже существует."
+    else
+        # Ищем подходящую секцию для добавления
+        local section_found=false
+        for header in "# ok icmp codes for INPUT" "# ok icmp code for INPUT"; do
+            if grep -q "^$header" "$BEFORE_RULES_FILE"; then
+                # Находим последнюю строку секции (строку с DROP/ACCEPT перед следующим блоком или концом)
+                # Это более надежный способ найти конец секции
+                local start_line=$(grep -n "^$header" "$BEFORE_RULES_FILE" | cut -d: -f1)
+                # Ищем следующую строку, начинающуюся с # или конец файла
+                local end_marker=$(tail -n +$((start_line + 1)) "$BEFORE_RULES_FILE" | grep -n -m 1 "^#" | cut -d: -f1)
+                local insert_line
+                if [[ -n "$end_marker" ]]; then
+                    insert_line=$((start_line + end_marker - 1))
+                else
+                    # Если нет следующего комментария, вставляем перед последней строкой файла
+                    insert_line=$(wc -l < "$BEFORE_RULES_FILE")
+                fi
+                # Вставляем правило перед найденной строкой
+                sed -i "${insert_line}i $rule" "$BEFORE_RULES_FILE"
+                log "Правило source-quench добавлено в секцию '$header'."
+                section_found=true
+                break
+            fi
+        done
+        if [ "$section_found" = false ]; then
+            log_warn "Не найдена подходящая секция INPUT для добавления правила source-quench."
+        fi
+    fi
+}
+
+# Обрабатываем INPUT (учитываем оба варианта названия секции)
+safe_replace_accept_in_section "# ok icmp codes for INPUT"
+safe_replace_accept_in_section "# ok icmp code for INPUT"
+
+# Обрабатываем FORWARD (учитываем оба варианта названия секции)
+safe_replace_accept_in_section "# ok icmp codes for FORWARD"
+safe_replace_accept_in_section "# ok icmp code for FORWARD"
+
+# Добавляем source-quench в INPUT
+safe_add_source_quench
 
 # Перезагружаем UFW, чтобы применить изменения в before.rules
 if ufw reload > /dev/null 2>&1; then
