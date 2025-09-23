@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # auto_xui_installer.sh - Скрипт автоматической установки и настройки 3x-ui
-# Версия: 3.0 (Финальная, надежная)
+# Версия: 4.0 (Финальная, исправленная)
 # Использование: bash <(curl -Ls https://raw.githubusercontent.com/Rrezzak09VPN/auto-xui-setup/main/auto_xui_installer.sh)
 
 # --- Цвета для вывода ---
@@ -56,16 +56,14 @@ log "Установка необходимых зависимостей..."
 apt-get install -y curl openssl sqlite3 ufw > /dev/null 2>&1 || { log_error "Не удалось установить необходимые зависимости."; exit 1; }
 log_success "Зависимости установлены."
 
-# --- Шаг 3: Автоматизированный запуск установщика 3x-ui ---
+# --- Шаг 3: Запуск официального скрипта установки 3x-ui с автоматизацией ввода ---
+# Отвечаем пустой строкой (Enter) на вопрос установщика, остальной вывод подавляем
 log "Запуск официального скрипта установки 3x-ui (автоматический режим)..."
-# Отвечаем "n" на вопрос о кастомизации порта, чтобы позволить установщику сгенерировать случайные данные
-{
-    echo "n" # Would you like to customize the Panel Port settings? (If not, a random port will be applied) [y/n]:
-    # Установщик может задавать дополнительные вопросы, но "n" и Enter должны пройти весь процесс
-} | bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) > /dev/null 2>&1
+echo "" | bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) > /dev/null 2>&1
 
 # Проверяем, успешно ли завершился установщик
-if [ ${PIPESTATUS[1]} -ne 0 ]; then
+# $? проверяет код возврата последней команды, которая была `bash <(...)`
+if [ $? -ne 0 ]; then
     log_error "Официальный скрипт установки завершился с ошибкой."
     exit 1
 fi
@@ -73,22 +71,25 @@ log_success "3x-ui установлен."
 
 # --- Шаг 4: Ожидание инициализации сервиса и БД ---
 log "Ожидание инициализации сервиса и базы данных..."
-sleep 10 # Даем сервису время стартовать
 
-local retries=30
-local count=0
-while [[ $count -lt $retries ]]; do
-    if [[ -f "$DB_PATH" ]] && sqlite3 "$DB_PATH" "SELECT 1 FROM settings LIMIT 1;" > /dev/null 2>&1; then
-        log_success "База данных готова."
-        break
-    fi
-    log_warn "База данных еще не готова, повторная проверка через 2 секунды... ($((count+1))/$retries)"
-    sleep 2
-    ((count++))
-done
+# Функция для ожидания готовности БД
+wait_for_db() {
+    local retries=30
+    local count=0
+    while [[ $count -lt $retries ]]; do
+        if [[ -f "$DB_PATH" ]] && sqlite3 "$DB_PATH" "SELECT 1 FROM settings LIMIT 1;" > /dev/null 2>&1; then
+            log_success "База данных готова."
+            return 0
+        fi
+        log_warn "База данных еще не готова, повторная проверка через 2 секунды... ($((count+1))/$retries)"
+        sleep 2
+        ((count++))
+    done
+    return 1
+}
 
-if [[ $count -eq $retries ]]; then
-    log_error "База данных не стала доступна после $retries попыток. Прерывание."
+if ! wait_for_db; then
+    log_error "База данных не стала доступна после попыток ожидания. Прерывание."
     exit 1
 fi
 
@@ -220,11 +221,9 @@ block_icmp_types() {
         if grep -q "\-\-icmp-type $type" "$BEFORE_RULES_FILE"; then
             # Заменяем ACCEPT на DROP
             sed -i "/--icmp-type $type/s/-j ACCEPT/-j DROP/" "$BEFORE_RULES_FILE"
-            # log "Правило для $type в $section изменено на DROP."
         else
             # Добавляем правило DROP перед # End of ok icmp codes
             sed -i "/# End of ok icmp codes for $section/i -A ufw-before-$section -p icmp --icmp-type $type -j DROP" "$BEFORE_RULES_FILE"
-            # log "Правило DROP для $type добавлено в $section."
         fi
     done
 }
