@@ -174,7 +174,7 @@ log "Блокировка ICMP (ping) запросов (идемпотентна
 # Функция для безопасной замены ACCEPT на DROP в секции ICMP
 safe_replace_accept_in_section() {
     local section_header="$1"
-    if grep -q "^$section_header" "$BEFORE_RULES_FILE"; then
+    if grep -q -- "^$section_header" "$BEFORE_RULES_FILE"; then
         # Создаем временную копию файла
         local temp_file=$(mktemp)
         # Копируем файл, заменяя ACCEPT на DROP только в пределах секции
@@ -197,7 +197,7 @@ safe_replace_accept_in_section() {
 safe_add_source_quench() {
     local rule="-A ufw-before-input -p icmp --icmp-type source-quench -j DROP"
     # Проверяем, существует ли правило уже (точное совпадение)
-    if grep -qF "$rule" "$BEFORE_RULES_FILE"; then
+    if grep -qF -- "$rule" "$BEFORE_RULES_FILE"; then
         log "Правило source-quench уже существует."
     else
         # Ищем подходящую секцию для добавления
