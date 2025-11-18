@@ -1,16 +1,8 @@
 #!/bin/bash
 
 # auto_xui_installer.sh - Автоматическая установка 3x-ui + VLESS+Reality inbound (3 клиента)
-# Версия: 6.1
+# Версия: 6.2 — совместима с Xray 25.10.15+ (PrivateKey/Password в x25519)
 # Обновлено: 18 ноября 2025 г.
-# Особенности:
-#   ✅ Чистая установка 3x-ui
-#   ✅ SSL для панели (самоподписанный)
-#   ✅ UFW + блокировка ICMP
-#   ✅ Reality inbound на порту 443 (VLESS/TCP)
-#   ✅ 3 клиента с flow=xtls-rprx-vision
-#   ✅ Генерация ссылок подключения
-#   ✅ Проверка портов, бэкап БД, rollback при ошибке
 
 # --- Конфигурация ---
 LOG_FILE="/tmp/xui_install_log_$(date +%s).txt"
@@ -19,7 +11,6 @@ CERT_CRT_FILE="$CERT_DIR/cert.crt"
 CERT_KEY_FILE="$CERT_DIR/secret.key"
 DB_PATH="/etc/x-ui/x-ui.db"
 BEFORE_RULES_FILE="/etc/ufw/before.rules"
-XRAY_BIN="/usr/local/x-ui/bin/xray"
 REALITY_PORT=443
 REALITY_TARGET="github.com:443"
 REALITY_SERVERNAMES=("github.com" "www.github.com")
@@ -38,45 +29,34 @@ log_success() { echo "[SUCCESS]$(date '+%Y-%m-%d %H:%M:%S') $1"; }
 generate_sub_id() {
     tr -dc 'a-z0-9' < /dev/urandom | head -c 16
 }
-
 generate_short_id() {
     openssl rand -hex $((2 + RANDOM % 7))
 }
 # --------------------------
 
 echo "========================================"
-log "🚀 Начало автоматической установки 3x-ui (v6.1)"
+log "🚀 Начало автоматической установки 3x-ui (v6.2)"
 log "   Включая VLESS+Reality inbound и 3 клиента"
 echo "========================================"
 
 # --- Шаг 1: Проверка root прав ---
-if [[ $EUID -ne 0 ]]; then
-   log_error "Этот скрипт должен быть запущен от root."
-   exit 1
-fi
+[[ $EUID -ne 0 ]] && { log_error "Запустите от root."; exit 1; }
 
 # --- Шаг 2: Установка зависимостей ---
 log "📦 Установка зависимостей..."
-if ! apt-get update > /dev/null 2>&1 || ! apt-get install -y curl openssl sqlite3 ufw net-tools uuid-runtime > /dev/null 2>&1; then
-    log_error "Ошибка установки зависимостей."
-    exit 1
-fi
+apt-get update > /dev/null 2>&1 && apt-get install -y curl openssl sqlite3 ufw net-tools uuid-runtime > /dev/null 2>&1 || {
+    log_error "Ошибка установки зависимостей."; exit 1;
+}
 log_success "Зависимости установлены."
 
 # --- Шаг 3: Запуск официального установщика ---
 log "📥 Запуск установщика 3x-ui..."
 rm -f "$LOG_FILE"
-
 exec 3< <({ echo "n"; } | bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh))
 tee "$LOG_FILE" <&3
 INSTALLER_EXIT_CODE=${PIPESTATUS[1]}
 exec 3<&-
-
-if [[ $INSTALLER_EXIT_CODE -ne 0 ]]; then
-    log_error "Ошибка установки 3x-ui (код $INSTALLER_EXIT_CODE)."
-    log "Лог: $LOG_FILE"
-    exit 1
-fi
+[[ $INSTALLER_EXIT_CODE -ne 0 ]] && { log_error "Ошибка установки 3x-ui (код $INSTALLER_EXIT_CODE)."; exit 1; }
 log_success "3x-ui установлен."
 
 # --- Шаг 4: Извлечение учетных данных ---
@@ -85,20 +65,15 @@ EXTRACTED_USERNAME=$(grep -oP 'Username:\s*\K\w+' "$LOG_FILE" | head -n1)
 EXTRACTED_PASSWORD=$(grep -oP 'Password:\s*\K\w+' "$LOG_FILE" | head -n1)
 EXTRACTED_PORT=$(grep -oP 'Port:\s*\K\d+' "$LOG_FILE" | head -n1)
 EXTRACTED_WEBBASEPATH=$(grep -oP 'WebBasePath:\s*\K[^[:space:]]+' "$LOG_FILE" | head -n1)
-
-if [[ -z "$EXTRACTED_USERNAME" || -z "$EXTRACTED_PASSWORD" || -z "$EXTRACTED_PORT" || -z "$EXTRACTED_WEBBASEPATH" ]]; then
-    log_error "Не удалось извлечь учетные данные."
-    exit 1
-fi
+[[ -z "$EXTRACTED_USERNAME" || -z "$EXTRACTED_PASSWORD" || -z "$EXTRACTED_PORT" || -z "$EXTRACTED_WEBBASEPATH" ]] && {
+    log_error "Не удалось извлечь учетные данные."; exit 1;
+}
 rm -f "$LOG_FILE"
 log "Данные панели получены."
 
 # --- Шаг 5: Ожидание БД ---
 log "⏳ Ожидание инициализации БД..."
-for i in {1..30}; do
-    [[ -f "$DB_PATH" ]] && break
-    sleep 1
-done
+for i in {1..30}; do [[ -f "$DB_PATH" ]] && break; sleep 1; done
 [[ ! -f "$DB_PATH" ]] && { log_error "БД не создана."; exit 1; }
 log_success "БД готова."
 
@@ -106,29 +81,24 @@ log_success "БД готова."
 log "🔐 Генерация SSL для панели..."
 mkdir -p "$CERT_DIR"
 SERVER_IP=$(hostname -I | awk '{print $1}'); [[ -z "$SERVER_IP" ]] && SERVER_IP="localhost"
-
-if ! openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
     -keyout "$CERT_KEY_FILE" -out "$CERT_CRT_FILE" \
     -subj "/C=US/ST=State/L=City/O=X-UI/CN=$SERVER_IP" \
-    -addext "subjectAltName=DNS:$(hostname),IP:$SERVER_IP" > /dev/null 2>&1; then
-    log_error "Ошибка генерации SSL."
-    exit 1
-fi
+    -addext "subjectAltName=DNS:$(hostname),IP:$SERVER_IP" > /dev/null 2>&1 || {
+    log_error "Ошибка генерации SSL."; exit 1;
+}
 chmod 600 "$CERT_KEY_FILE" && chmod 644 "$CERT_CRT_FILE"
 log_success "SSL сертификат создан."
 
 # --- Шаг 7: Обновление путей в БД ---
 log "💾 Обновление путей к сертификатам в БД..."
-sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO settings (key, value) VALUES ('webCertFile', '$CERT_CRT_FILE');" ||
-    { log_error "Не удалось обновить webCertFile."; exit 1; }
-sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO settings (key, value) VALUES ('webKeyFile', '$CERT_KEY_FILE');" ||
-    { log_error "Не удалось обновить webKeyFile."; exit 1; }
+sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO settings (key, value) VALUES ('webCertFile', '$CERT_CRT_FILE');" || { log_error "webCertFile"; exit 1; }
+sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO settings (key, value) VALUES ('webKeyFile', '$CERT_KEY_FILE');" || { log_error "webKeyFile"; exit 1; }
 log_success "Пути к сертификатам обновлены."
 
 # --- Шаг 8: Перезапуск панели ---
 log "🔄 Перезапуск x-ui..."
-systemctl restart x-ui
-sleep 5
+systemctl restart x-ui; sleep 5
 
 # --- Шаг 9: Настройка UFW ---
 log "🛡️  Настройка UFW..."
@@ -173,12 +143,12 @@ ufw reload >/dev/null 2>&1
 log_success "ICMP заблокирован."
 
 # ===================================================================================
-# === ШАГ 11: VLESS + REALITY INBOUND (ИСПРАВЛЕННАЯ ВЕРСИЯ) =========================
+# === ШАГ 11: VLESS + REALITY INBOUND — ПОЛНОСТЬЮ ИСПРАВЛЕННЫЙ БЛОК =================
 # ===================================================================================
 
 log "⚡ Шаг 11: Настройка VLESS+Reality inbound..."
 
-# --- Проверка порта 443 ---
+# --- Проверка занятости порта 443 ---
 if ss -tuln 2>/dev/null | grep -q ":$REALITY_PORT "; then
     log_error "Порт $REALITY_PORT занят. Остановите мешающие сервисы:"
     ss -tulnp 2>/dev/null | grep ":$REALITY_PORT "
@@ -193,58 +163,42 @@ if [[ "$PANEL_PORT" == "$REALITY_PORT" ]]; then
     sqlite3 "$DB_PATH" "UPDATE settings SET value = '$NEW_PORT' WHERE key = 'webPort';"
 fi
 
-# --- Генерация ключей Reality (универсальная совместимость со всеми версиями 3x-ui) ---
-log "🔑 Поиск и проверка Xray бинарника..."
+# --- Поиск и проверка Xray (поддержка xray-linux-amd64 и др.) ---
+log "🔍 Поиск Xray бинарника..."
 XRAY_BIN=""
-# Ищем первый исполняемый файл, начинающийся с 'xray', исключая .dat/.md/.json
 for candidate in /usr/local/x-ui/bin/xray*; do
-    # Пропускаем несуществующие (если glob не совпал)
     [[ ! -e "$candidate" ]] && continue
-    # Пропускаем неисполняемые или нефайлы
     [[ ! -x "$candidate" || ! -f "$candidate" ]] && continue
-    # Пропускаем .dat, .md, .json, .txt
-    case "$candidate" in
-        *.dat|*.md|*.json|*.txt|*README*) continue ;;
-    esac
-    XRAY_BIN="$candidate"
-    log "Найден Xray: $XRAY_BIN"
-    break
+    case "$candidate" in *.dat|*.md|*.json|*.txt|*README*) continue ;; esac
+    XRAY_BIN="$candidate"; break
 done
+[[ -z "$XRAY_BIN" ]] && { log_error "Xray не найден."; ls -la /usr/local/x-ui/bin/ | log; exit 1; }
 
-if [[ -z "$XRAY_BIN" ]]; then
-    log_error "❌ Xray не найден в /usr/local/x-ui/bin/"
-    log "Содержимое директории:"
-    ls -la /usr/local/x-ui/bin/ | while IFS= read -r line; do log "  $line"; done
-    exit 1
-fi
+"$XRAY_BIN" version >/dev/null 2>&1 || {
+    log_error "Файл $XRAY_BIN не является валидным Xray."; exit 1;
+}
+log "✅ Xray: $($XRAY_BIN version | head -n1 | cut -d' ' -f1-3)"
 
-# Проверяем, что это действительно xray
-if ! "$XRAY_BIN" version >/dev/null 2>&1; then
-    log_error "❌ Файл $XRAY_BIN не является валидным Xray (проверка 'version' не прошла)"
-    "$XRAY_BIN" version 2>&1 | while IFS= read -r line; do log_error "  $line"; done
-    exit 1
-fi
-
-log "✅ Xray подтверждён: $($XRAY_BIN version | head -n1 | cut -d' ' -f1-3)"
-
-# Генерация ключей
+# --- Генерация Reality-ключей (совместимо с Xray ≥25: PrivateKey / Password) ---
 log "🔐 Генерация Reality ключей (x25519)..."
-REALITY_KEYS=$("$XRAY_BIN" x25519 2>/dev/null)
-REALITY_PRIVATE_KEY=$(echo "$REALITY_KEYS" | grep "Private key:" | cut -d' ' -f3)
-REALITY_PUBLIC_KEY=$(echo "$REALITY_KEYS" | grep "Public key:" | cut -d' ' -f3)
+REALITY_KEYS=$("$XRAY_BIN" x25519 2>&1)
+REALITY_PRIVATE_KEY=$(echo "$REALITY_KEYS" | grep -i "^PrivateKey:" | awk '{print $2}')
+REALITY_PUBLIC_KEY=$(echo "$REALITY_KEYS" | grep -i "^Password:" | awk '{print $2}')
+
+# Fallback на старый формат (на случай downgrade)
+[[ -z "$REALITY_PRIVATE_KEY" ]] && REALITY_PRIVATE_KEY=$(echo "$REALITY_KEYS" | grep -i "Private key:" | awk '{print $3}')
+[[ -z "$REALITY_PUBLIC_KEY" ]] && REALITY_PUBLIC_KEY=$(echo "$REALITY_KEYS" | grep -i "Public key:" | awk '{print $3}')
 
 if [[ -z "$REALITY_PRIVATE_KEY" || -z "$REALITY_PUBLIC_KEY" ]]; then
-    log_error "❌ Не удалось извлечь ключи из x25519"
-    log "Вывод x25519:"
+    log_error "❌ Не удалось извлечь ключи:"
     echo "$REALITY_KEYS" | while IFS= read -r line; do log "  $line"; done
     exit 1
 fi
-log "✅ Reality ключи успешно сгенерированы"
+log "✅ Private Key: $(echo $REALITY_PRIVATE_KEY | cut -c1-8)..."
+log "✅ Public  Key: $(echo $REALITY_PUBLIC_KEY | cut -c1-8)..."
 
-# --- Генерация shortIds (5 штук) ---
+# --- Генерация shortIds (5 штук) и 3 клиентов ---
 SHORTIDS=(); for i in {1..5}; do SHORTIDS+=("$(generate_short_id)"); done
-
-# --- Генерация 3 клиентов ---
 CLIENTS=()
 for i in {1..3}; do
     UUID=$(uuidgen); EMAIL="client_$i@auto"; SUBID=$(generate_sub_id); TS=$(($(date +%s)000))
@@ -263,14 +217,11 @@ SETTINGS_JSON+='],"decryption":"none","encryption":"none"}'
 STREAM_JSON=$(printf '%s' \
 '{"network":"tcp","security":"reality","externalProxy":[],"realitySettings":{"show":false,"xver":0,"target":"'"$REALITY_TARGET"'","serverNames":['"$(printf '"%s",' "${REALITY_SERVERNAMES[@]}" | sed 's/,$//')"'],"privateKey":"'"$REALITY_PRIVATE_KEY"'","minClientVer":"","maxClientVer":"","maxTimediff":0,"shortIds":['"$(printf '"%s",' "${SHORTIDS[@]}" | sed 's/,$//')"'],"mldsa65Seed":"","settings":{"publicKey":"'"$REALITY_PUBLIC_KEY"'","fingerprint":"'"$REALITY_FINGERPRINT"'","serverName":"","spiderX":"'"$REALITY_SPIDERX"'","mldsa65Verify":""}},"tcpSettings":{"acceptProxyProtocol":false,"header":{"type":"none"}}}')
 
-# --- Бэкап БД ---
+# --- Бэкап и вставка inbound ---
 BACKUP_DB="$DB_PATH.bak_$(date +%s)"
 cp "$DB_PATH" "$BACKUP_DB" && log "💾 Бэкап БД: $BACKUP_DB"
-
-# --- Удаление старых inbound'ов ---
 sqlite3 "$DB_PATH" "DELETE FROM inbounds WHERE port = $REALITY_PORT;" 2>/dev/null
 
-# --- Вставка нового inbound ---
 log "📥 Вставка inbound в БД..."
 sqlite3 "$DB_PATH" <<EOF
 INSERT INTO inbounds (
@@ -289,23 +240,19 @@ EOF
 
 if [[ $? -ne 0 ]]; then
     log_error "Ошибка вставки inbound. Восстановление из бэкапа."
-    cp "$BACKUP_DB" "$DB_PATH"
-    exit 1
+    cp "$BACKUP_DB" "$DB_PATH"; exit 1
 fi
 log_success "Inbound добавлен."
 
 # --- Перезапуск и проверка ---
 systemctl restart x-ui; sleep 5
-if journalctl -u x-ui -n 30 --no-pager 2>/dev/null | grep -q "started.*:$REALITY_PORT"; then
-    log_success "✅ Reality inbound активен на порту $REALITY_PORT"
-else
+journalctl -u x-ui -n 30 --no-pager 2>/dev/null | grep -q "started.*:$REALITY_PORT" && \
+    log_success "✅ Reality inbound активен на порту $REALITY_PORT" || \
     log_warn "Inbound не подтверждён в логах. Проверьте: journalctl -u x-ui"
-fi
 
 # --- Генерация ссылок ---
 echo; log "🔗 ССЫЛКИ ДЛЯ ПОДКЛЮЧЕНИЯ:"
 SERVER_IP=$(hostname -I | awk '{print $1}'); [[ -z "$SERVER_IP" ]] && SERVER_IP="YOUR_SERVER_IP"
-
 for idx in "${!CLIENTS[@]}"; do
     IFS='|' read -r UUID EMAIL _ _ <<< "${CLIENTS[$idx]}"
     SID=${SHORTIDS[$idx]}
@@ -316,7 +263,7 @@ for idx in "${!CLIENTS[@]}"; do
 done
 
 # ===================================================================================
-# === ШАГ 12: ИТОГИ =================================================================
+# === ШАГ 12: ИТОГИ ================================================================
 # ===================================================================================
 
 PANEL_PORT=$(sqlite3 "$DB_PATH" "SELECT value FROM settings WHERE key = 'webPort';")
@@ -324,18 +271,17 @@ PANEL_URL="https://$SERVER_IP:$PANEL_PORT$(echo "/$EXTRACTED_WEBBASEPATH" | sed 
 SERVICE_STATUS=$(systemctl is-active x-ui 2>/dev/null)
 
 echo "========================================"
-log_success "✅ УСТАНОВКА ЗАВЕРШЕНА (v6.1)"
+log_success "✅ УСТАНОВКА ЗАВЕРШЕНА (v6.2)"
 echo
 log "📍 Панель: $PANEL_URL"
 echo "   Логин: $EXTRACTED_USERNAME"
 echo "   Пароль: $EXTRACTED_PASSWORD"
 log "⚙️  Служба: $SERVICE_STATUS"
-log "🌐 Reality: VLESS+TCP+Reality (порт $REALITY_PORT, target=$REALITY_TARGET)"
+log "🌐 Reality: VLESS+TCP+Reality (порт $REALITY_PORT)"
 log "👥 Клиенты: 3 (см. ссылки выше)"
 echo
 log "📌 Советы:"
-echo "  • В браузере при заходе в панель нажмите «Дополнительно → Перейти» (самоподписанный SSL)"
+echo "  • В браузере при заходе в панель нажмите «Дополнительно → Перейти»"
 echo "  • Скопируйте любую ссылку в клиент (V2RayN, Qv2ray, Sing-box)"
-echo "  • Для смены target/SNI — отредактируйте inbound в панели"
 echo "========================================"
 exit 0
