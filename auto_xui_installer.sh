@@ -193,20 +193,53 @@ if [[ "$PANEL_PORT" == "$REALITY_PORT" ]]; then
     sqlite3 "$DB_PATH" "UPDATE settings SET value = '$NEW_PORT' WHERE key = 'webPort';"
 fi
 
-# --- Генерация ключей Reality ---
-log "🔑 Генерация Reality ключей..."
-[[ ! -x "$XRAY_BIN" ]] && XRAY_BIN=$(find /usr/local/x-ui -name xray -type f | head -n1)
-[[ ! -x "$XRAY_BIN" ]] && { log_error "Xray не найден."; exit 1; }
+# --- Генерация ключей Reality (универсальная совместимость со всеми версиями 3x-ui) ---
+log "🔑 Поиск и проверка Xray бинарника..."
+XRAY_BIN=""
+# Ищем первый исполняемый файл, начинающийся с 'xray', исключая .dat/.md/.json
+for candidate in /usr/local/x-ui/bin/xray*; do
+    # Пропускаем несуществующие (если glob не совпал)
+    [[ ! -e "$candidate" ]] && continue
+    # Пропускаем неисполняемые или нефайлы
+    [[ ! -x "$candidate" || ! -f "$candidate" ]] && continue
+    # Пропускаем .dat, .md, .json, .txt
+    case "$candidate" in
+        *.dat|*.md|*.json|*.txt|*README*) continue ;;
+    esac
+    XRAY_BIN="$candidate"
+    log "Найден Xray: $XRAY_BIN"
+    break
+done
 
+if [[ -z "$XRAY_BIN" ]]; then
+    log_error "❌ Xray не найден в /usr/local/x-ui/bin/"
+    log "Содержимое директории:"
+    ls -la /usr/local/x-ui/bin/ | while IFS= read -r line; do log "  $line"; done
+    exit 1
+fi
+
+# Проверяем, что это действительно xray
+if ! "$XRAY_BIN" version >/dev/null 2>&1; then
+    log_error "❌ Файл $XRAY_BIN не является валидным Xray (проверка 'version' не прошла)"
+    "$XRAY_BIN" version 2>&1 | while IFS= read -r line; do log_error "  $line"; done
+    exit 1
+fi
+
+log "✅ Xray подтверждён: $($XRAY_BIN version | head -n1 | cut -d' ' -f1-3)"
+
+# Генерация ключей
+log "🔐 Генерация Reality ключей (x25519)..."
 REALITY_KEYS=$("$XRAY_BIN" x25519 2>/dev/null)
 REALITY_PRIVATE_KEY=$(echo "$REALITY_KEYS" | grep "Private key:" | cut -d' ' -f3)
 REALITY_PUBLIC_KEY=$(echo "$REALITY_KEYS" | grep "Public key:" | cut -d' ' -f3)
 
-[[ -z "$REALITY_PRIVATE_KEY" || -z "$REALITY_PUBLIC_KEY" ]] && {
-    log_error "Не удалось сгенерировать ключи. Проверьте: $XRAY_BIN x25519"
+if [[ -z "$REALITY_PRIVATE_KEY" || -z "$REALITY_PUBLIC_KEY" ]]; then
+    log_error "❌ Не удалось извлечь ключи из x25519"
+    log "Вывод x25519:"
+    echo "$REALITY_KEYS" | while IFS= read -r line; do log "  $line"; done
     exit 1
-}
-log "Reality ключи: OK"
+fi
+log "✅ Reality ключи успешно сгенерированы"
 
 # --- Генерация shortIds (5 штук) ---
 SHORTIDS=(); for i in {1..5}; do SHORTIDS+=("$(generate_short_id)"); done
