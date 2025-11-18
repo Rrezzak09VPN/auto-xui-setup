@@ -223,17 +223,25 @@ cp "$DB_PATH" "$BACKUP_DB" && log "💾 Бэкап БД: $BACKUP_DB"
 sqlite3 "$DB_PATH" "DELETE FROM inbounds WHERE port = $REALITY_PORT;" 2>/dev/null
 
 log "📥 Вставка inbound в БД..."
+# Определяем user_id администратора (по username из установки)
+ADMIN_USER_ID=$(sqlite3 "$DB_PATH" "SELECT id FROM users WHERE username = '$EXTRACTED_USERNAME';")
+# Если не нашли — fallback на 1 (обычно admin = id 1)
+[[ -z "$ADMIN_USER_ID" ]] && ADMIN_USER_ID=1
+
+# Генерируем уникальный tag, чтобы избежать дубликатов при повторных запусках
+UNIQUE_TAG="auto-reality-$(date +%s)"
+
 sqlite3 "$DB_PATH" <<EOF
 INSERT INTO inbounds (
     user_id, up, down, total, remark, enable, expiry_time,
     traffic_reset, last_traffic_reset_time, listen, port, protocol,
     settings, stream_settings, tag, sniffing
 ) VALUES (
-    0, 0, 0, 0, 'AutoReality', 1, 0,
+    $ADMIN_USER_ID, 0, 0, 0, 'AutoReality', 1, 0,
     'never', 0, '', $REALITY_PORT, 'vless',
     '$(echo "$SETTINGS_JSON" | sed "s/'/''/g")',
     '$(echo "$STREAM_JSON" | sed "s/'/''/g")',
-    'inbound-$REALITY_PORT',
+    '$UNIQUE_TAG',
     '{"enabled":false,"destOverride":["http","tls","quic","fakedns"],"metadataOnly":false,"routeOnly":false}'
 );
 EOF
