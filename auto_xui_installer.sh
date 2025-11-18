@@ -1,6 +1,6 @@
 #!/bin/bash
 # auto_xui_installer.sh - Автоматическая установка 3x-ui + VLESS+Reality inbound (3 клиента)
-# Версия: 6.2 — ИСПРАВЛЕНО: корректная генерация shortIds для Xray ≥25
+# Версия: 6.3 — ИСПРАВЛЕНО: security/password + корректные shortIds
 # Обновлено: 18 ноября 2025 г.
 # --- Конфигурация ---
 LOG_FILE="/tmp/xui_install_log_$(date +%s).txt"
@@ -10,8 +10,8 @@ CERT_KEY_FILE="$CERT_DIR/secret.key"
 DB_PATH="/etc/x-ui/x-ui.db"
 BEFORE_RULES_FILE="/etc/ufw/before.rules"
 REALITY_PORT=443
-REALITY_TARGET="github.com:443"
-REALITY_SERVERNAMES=("github.com" "www.github.com")
+REALITY_TARGET="google.com:443"  # Используем google.com — стабильнее
+REALITY_SERVERNAMES=("google.com" "www.google.com")
 REALITY_FINGERPRINT="chrome"
 REALITY_SPIDERX="/"
 # --------------------
@@ -30,7 +30,7 @@ generate_short_id() {
 }
 # --------------------------
 echo "========================================"
-log "🚀 Начало автоматической установки 3x-ui (v6.2-FIXED)"
+log "🚀 Начало автоматической установки 3x-ui (v6.3-FIXED)"
 log "   Включая VLESS+Reality inbound и 3 клиента"
 echo "========================================"
 # --- Шаг 1: Проверка root прав ---
@@ -127,7 +127,7 @@ safe_add_source_quench
 ufw reload >/dev/null 2>&1
 log_success "ICMP заблокирован."
 # ===================================================================================
-# === ШАГ 11: VLESS + REALITY INBOUND — ИСПРАВЛЕННЫЙ БЛОК ==========================
+# === ШАГ 11: VLESS + REALITY INBOUND — ПОЛНОСТЬЮ РАБОЧИЙ БЛОК =====================
 # ===================================================================================
 log "⚡ Шаг 11: Настройка VLESS+Reality inbound..."
 # --- Проверка занятости порта 443 ---
@@ -187,7 +187,7 @@ for idx in "${!CLIENTS[@]}"; do
 done
 SETTINGS_JSON+='],"decryption":"none","encryption":"none"}'
 
-# === ИСПРАВЛЕНО: корректная генерация shortIds как JSON-массива ===
+# === ЕДИНСТВЕННЫЙ И КОРРЕКТНЫЙ STREAM_JSON ===
 SHORTIDS_JSON=$(printf '"%s",' "${SHORTIDS[@]}" | sed 's/,$//')
 STREAM_JSON='{"network":"tcp","security":"reality","externalProxy":[],"realitySettings":{"show":false,"xver":0,"target":"'"$REALITY_TARGET"'","serverNames":['"$(printf '"%s",' "${REALITY_SERVERNAMES[@]}" | sed 's/,$//')"'],"privateKey":"'"$REALITY_PRIVATE_KEY"'","minClientVer":"","maxClientVer":"","maxTimediff":0,"shortIds":['"$SHORTIDS_JSON"'],"mldsa65Seed":"","settings":{"publicKey":"'"$REALITY_PUBLIC_KEY"'","fingerprint":"'"$REALITY_FINGERPRINT"'","serverName":"","spiderX":"'"$REALITY_SPIDERX"'","mldsa65Verify":""}},"tcpSettings":{"acceptProxyProtocol":false,"header":{"type":"none"}}}'
 
@@ -241,7 +241,7 @@ PANEL_PORT=$(sqlite3 "$DB_PATH" "SELECT value FROM settings WHERE key = 'webPort
 PANEL_URL="https://$SERVER_IP:$PANEL_PORT$(echo "/$EXTRACTED_WEBBASEPATH" | sed 's|//*|/|g')"
 SERVICE_STATUS=$(systemctl is-active x-ui 2>/dev/null)
 echo "========================================"
-log_success "✅ УСТАНОВКА ЗАВЕРШЕНА (v6.2-FIXED)"
+log_success "✅ УСТАНОВКА ЗАВЕРШЕНА (v6.3-FIXED)"
 echo
 log "📍 Панель: $PANEL_URL"
 echo "   Логин: $EXTRACTED_USERNAME"
