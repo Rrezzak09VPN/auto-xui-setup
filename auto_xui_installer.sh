@@ -183,7 +183,7 @@ SETTINGS_JSON='{"clients":['
 for idx in "${!CLIENTS[@]}"; do
     IFS='|' read -r UUID EMAIL SUBID TS <<< "${CLIENTS[$idx]}"
     [[ $idx -gt 0 ]] && SETTINGS_JSON+=","
-    SETTINGS_JSON+="{\"comment\":\"\",\"created_at\":$TS,\"email\":\"$EMAIL\",\"enable\":true,\"expiryTime\":0,\"flow\":\"xtls-rprx-vision\",\"id\":\"$UUID\",\"limitIp\":0,\"reset\":0,\"subId\":\"$SUBID\",\"tgId\":0,\"totalGB\":0,\"updated_at\":$TS}"
+    SETTINGS_JSON+="{\"id\":\"$UUID\",\"security\":\"\",\"password\":\"\",\"flow\":\"xtls-rprx-vision\",\"email\":\"$EMAIL\",\"limitIp\":0,\"totalGB\":0,\"expiryTime\":0,\"enable\":true,\"tgId\":0,\"subId\":\"$SUBID\",\"comment\":\"\",\"reset\":0,\"created_at\":$TS,\"updated_at\":$TS}"
 done
 SETTINGS_JSON+='],"decryption":"none","encryption":"none"}'
 
