@@ -277,8 +277,13 @@ log "📊 Создание записей статистики..."
 INBOUND_ID=$(sqlite3 "$DB_PATH" "SELECT id FROM inbounds WHERE tag = '$UNIQUE_TAG';")
 for idx in "${!CLIENTS[@]}"; do
     IFS='|' read -r UUID EMAIL SUBID TS <<< "${CLIENTS[$idx]}"
-    sqlite3 "$DB_PATH" "INSERT OR IGNORE INTO client_traffics (inbound_id, enable, email, up, down, all_time, expiry_time, total, reset, last_online) VALUES ($INBOUND_ID, 1, '$EMAIL', 0, 0, 0, 0, 0, 0, 0);" 2>/dev/null
-    sqlite3 "$DB_PATH" "INSERT OR IGNORE INTO inbound_client_ips (client_email, ips) VALUES ('$EMAIL', '[]');" 2>/dev/null
+    
+    # УДАЛЯЕМ старые записи и СОЗДАЕМ новые с правильным inbound_id
+    sqlite3 "$DB_PATH" "DELETE FROM client_traffics WHERE email = '$EMAIL';" 2>/dev/null
+    sqlite3 "$DB_PATH" "INSERT INTO client_traffics (inbound_id, enable, email, up, down, all_time, expiry_time, total, reset, last_online) VALUES ($INBOUND_ID, 1, '$EMAIL', 0, 0, 0, 0, 0, 0, 0);"
+    
+    sqlite3 "$DB_PATH" "DELETE FROM inbound_client_ips WHERE client_email = '$EMAIL';" 2>/dev/null
+    sqlite3 "$DB_PATH" "INSERT INTO inbound_client_ips (client_email, ips) VALUES ('$EMAIL', '[]');"
 done
 log_success "Записи статистики созданы для всех клиентов"
 
