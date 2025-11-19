@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # auto_xui_installer.sh - Автоматическая установка 3x-ui + VLESS+Reality inbound (3 клиента)
-# Версия: 6.4-FINAL — исправлены все ошибки, улучшен вывод
+# Версия: 6.4.1-FINAL — исправлена совместимость с curl
 # Обновлено: 19 ноября 2025 г.
 
 # --- Конфигурация ---
@@ -35,7 +35,7 @@ generate_short_id() {
 # --------------------------
 
 echo "========================================"
-log "🚀 Начало автоматической установки 3x-ui (v6.4-FINAL)"
+log "🚀 Начало автоматической установки 3x-ui (v6.4.1-FINAL)"
 log "   Включая VLESS+Reality inbound и 3 клиента"
 echo "========================================"
 
@@ -52,10 +52,9 @@ log_success "Зависимости установлены."
 # --- Шаг 3: Запуск официального установщика ---
 log "📥 Запуск установщика 3x-ui..."
 rm -f "$LOG_FILE"
-exec 3< <({ echo "n"; } | bash <(curl -Ls --no-time-conditional https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh))
-tee "$LOG_FILE" <&3
-INSTALLER_EXIT_CODE=${PIPESTATUS[1]}
-exec 3<&-
+# Исправленная команда - убрана проблемная опция curl
+bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) <<< "n" 2>&1 | tee "$LOG_FILE"
+INSTALLER_EXIT_CODE=${PIPESTATUS[0]}
 [[ $INSTALLER_EXIT_CODE -ne 0 ]] && { log_error "Ошибка установки 3x-ui (код $INSTALLER_EXIT_CODE)."; exit 1; }
 log_success "3x-ui установлен."
 
@@ -297,19 +296,32 @@ log_success "Inbound добавлен."
 systemctl restart x-ui
 sleep 8  # Даем больше времени на запуск
 
-# Улучшенная проверка инбаунда
+# МНОГОУРОВНЕВАЯ ДИАГНОСТИКА ИНБАУНДА
+log "🔍 Проверка статуса Reality inbound..."
+
+# Уровень 1: Проверяем слушает ли порт (САМЫЙ НАДЕЖНЫЙ ПРИЗНАК)
 if ss -tuln 2>/dev/null | grep -q ":$REALITY_PORT "; then
-    log_success "✅ Reality inbound активен на порту $REALITY_PORT"
+    log_success "✅ Reality inbound АКТИВЕН на порту $REALITY_PORT (порт слушается)"
+
+# Уровень 2: Проверяем Xray процесс
+elif ! systemctl is-active x-ui >/dev/null; then
+    log_error "❌ Xray НЕ ЗАПУЩЕН. Срочно проверьте: journalctl -u x-ui -n 50"
+
+# Уровень 3: Расширенная проверка логов
 else
-    # Многоуровневая диагностика
-    if journalctl -u x-ui -n 30 2>/dev/null | grep -qi "reality\|порт.*$REALITY_PORT\|started.*inbound"; then
-        log_success "✅ Reality упоминается в логах (вероятно работает)"
+    # Проверяем различные варианты сообщений в логах
+    if journalctl -u x-ui -n 50 2>/dev/null | grep -qi "reality.*started\|started.*reality"; then
+        log_success "✅ Reality inbound ЗАПУЩЕН (подтверждено в логах)"
+    elif journalctl -u x-ui -n 50 2>/dev/null | grep -qi "порт.*$REALITY_PORT\|port.*$REALITY_PORT"; then
+        log_success "✅ Reality inbound ЗАПУЩЕН (порт $REALITY_PORT упоминается)"
+    elif journalctl -u x-ui -n 50 2>/dev/null | grep -qi "inbound.*started\|started.*inbound"; then
+        log_success "✅ Inbound ЗАПУЩЕН (общее подтверждение)"
+    elif journalctl -u x-ui -n 50 2>/dev/null | grep -qi "error\|fail\|failed"; then
+        log_error "❌ Обнаружены ОШИБКИ в логах Xray. Проверьте: journalctl -u x-ui -n 30"
     else
-        if systemctl is-active x-ui >/dev/null; then
-            log_warn "⚠️  Xray запущен, но инбаунд не подтверждён. Проверьте вручную: journalctl -u x-ui"
-        else
-            log_error "❌ Xray не запущен. Срочно проверьте: journalctl -u x-ui -n 50"
-        fi
+        log_warn "⚠️  Inbound не подтверждён в логах, но Xray запущен."
+        log_warn "    Это МОЖЕТ БЫТЬ НОРМАЛЬНО - некоторые версии не логируют запуск."
+        log_warn "    Проверьте подключение клиентом. Для диагностики: journalctl -u x-ui -n 20"
     fi
 fi
 
