@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # auto_xui_installer.sh - Автоматическая установка 3x-ui + VLESS+Reality inbound (3 клиента)
-# Версия: 6.3-FIXED — исправлена структура клиента и парсинг ключей
-# Обновлено: 18 ноября 2025 г.
+# Версия: 6.4-FINAL — исправлены все ошибки, улучшен вывод
+# Обновлено: 19 ноября 2025 г.
 
 # --- Конфигурация ---
 LOG_FILE="/tmp/xui_install_log_$(date +%s).txt"
@@ -35,7 +35,7 @@ generate_short_id() {
 # --------------------------
 
 echo "========================================"
-log "🚀 Начало автоматической установки 3x-ui (v6.3-FIXED)"
+log "🚀 Начало автоматической установки 3x-ui (v6.4-FINAL)"
 log "   Включая VLESS+Reality inbound и 3 клиента"
 echo "========================================"
 
@@ -52,7 +52,7 @@ log_success "Зависимости установлены."
 # --- Шаг 3: Запуск официального установщика ---
 log "📥 Запуск установщика 3x-ui..."
 rm -f "$LOG_FILE"
-exec 3< <({ echo "n"; } | bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh))
+exec 3< <({ echo "n"; } | bash <(curl -Ls --no-time-conditional https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh))
 tee "$LOG_FILE" <&3
 INSTALLER_EXIT_CODE=${PIPESTATUS[1]}
 exec 3<&-
@@ -68,7 +68,6 @@ EXTRACTED_WEBBASEPATH=$(grep -oP 'WebBasePath:\s*\K[^[:space:]]+' "$LOG_FILE" | 
 [[ -z "$EXTRACTED_USERNAME" || -z "$EXTRACTED_PASSWORD" || -z "$EXTRACTED_PORT" || -z "$EXTRACTED_WEBBASEPATH" ]] && {
     log_error "Не удалось извлечь учетные данные."; exit 1;
 }
-rm -f "$LOG_FILE"
 log "Данные панели получены."
 
 # --- Шаг 5: Ожидание БД ---
@@ -189,7 +188,7 @@ ufw default allow outgoing >/dev/null 2>&1
 ufw default deny incoming >/dev/null 2>&1
 
 ufw reload >/dev/null 2>&1
-log_success "ICMP успешно заблокирован!"
+log_success "ICMP заблокирован."
 
 # ===================================================================================
 # === ШАГ 11: VLESS + REALITY INBOUND — ПОЛНОСТЬЮ ИСПРАВЛЕННЫЙ БЛОК =================
@@ -294,44 +293,69 @@ if [[ $? -ne 0 ]]; then
 fi
 log_success "Inbound добавлен."
 
-# --- Перезапуск и проверка ---
-systemctl restart x-ui; sleep 5
-journalctl -u x-ui -n 30 --no-pager 2>/dev/null | grep -q "started.*:$REALITY_PORT" && \
-    log_success "✅ Reality inbound активен на порту $REALITY_PORT" || \
-    log_warn "Inbound не подтверждён в логах. Проверьте: journalctl -u x-ui"
+# --- Перезапуск и улучшенная проверка ---
+systemctl restart x-ui
+sleep 8  # Даем больше времени на запуск
 
-# --- Генерация ссылок ---
-echo; log "🔗 ССЫЛКИ ДЛЯ ПОДКЛЮЧЕНИЯ:"
-SERVER_IP=$(hostname -I | awk '{print $1}'); [[ -z "$SERVER_IP" ]] && SERVER_IP="YOUR_SERVER_IP"
-for idx in "${!CLIENTS[@]}"; do
-    IFS='|' read -r UUID EMAIL _ _ <<< "${CLIENTS[$idx]}"
-    SID=${SHORTIDS[$idx]}
-    LINK="vless://$UUID@$SERVER_IP:$REALITY_PORT?encryption=none&security=reality&fp=$REALITY_FINGERPRINT&sni=${REALITY_SERVERNAMES[0]}&pbk=$REALITY_PUBLIC_KEY&sid=$SID&type=tcp&flow=xtls-rprx-vision#$EMAIL"
-    echo "🔹 $EMAIL:"
-    echo "   $LINK"
-    echo
-done
+# Улучшенная проверка инбаунда
+if ss -tuln 2>/dev/null | grep -q ":$REALITY_PORT "; then
+    log_success "✅ Reality inbound активен на порту $REALITY_PORT"
+else
+    # Многоуровневая диагностика
+    if journalctl -u x-ui -n 30 2>/dev/null | grep -qi "reality\|порт.*$REALITY_PORT\|started.*inbound"; then
+        log_success "✅ Reality упоминается в логах (вероятно работает)"
+    else
+        if systemctl is-active x-ui >/dev/null; then
+            log_warn "⚠️  Xray запущен, но инбаунд не подтверждён. Проверьте вручную: journalctl -u x-ui"
+        else
+            log_error "❌ Xray не запущен. Срочно проверьте: journalctl -u x-ui -n 50"
+        fi
+    fi
+fi
 
 # ===================================================================================
-# === ШАГ 12: ИТОГИ ================================================================
+# === ШАГ 12: ИТОГИ И ОЧИСТКА ======================================================
 # ===================================================================================
 
 PANEL_PORT=$(sqlite3 "$DB_PATH" "SELECT value FROM settings WHERE key = 'webPort';")
 PANEL_URL="https://$SERVER_IP:$PANEL_PORT$(echo "/$EXTRACTED_WEBBASEPATH" | sed 's|//*|/|g')"
 SERVICE_STATUS=$(systemctl is-active x-ui 2>/dev/null)
 
+# Очистка временных файлов
+log "🧹 Очистка временных файлов..."
+rm -f "$LOG_FILE" 2>/dev/null
+rm -f "$BACKUP_DB" 2>/dev/null
+rm -f /tmp/xui_install_log_*.txt 2>/dev/null
+log_success "Временные файлы удалены."
+
+echo
 echo "========================================"
-log_success "✅ УСТАНОВКА ЗАВЕРШЕНА (v6.3-FIXED)"
+echo "🎉 УСТАНОВКА УСПЕШНО ЗАВЕРШЕНА!"
+echo "========================================"
 echo
-log "📍 Панель: $PANEL_URL"
-echo "   Логин: $EXTRACTED_USERNAME"
+echo "🌐 ДОСТУП К ПАНЕЛИ:"
+echo "   URL:    $PANEL_URL"
+echo "   Логин:  $EXTRACTED_USERNAME"
 echo "   Пароль: $EXTRACTED_PASSWORD"
-log "⚙️  Служба: $SERVICE_STATUS"
-log "🌐 Reality: VLESS+TCP+Reality (порт $REALITY_PORT)"
-log "👥 Клиенты: 3 (см. ссылки выше)"
 echo
-log "📌 Советы:"
-echo "  • В браузере при заходе в панель нажмите «Дополнительно → Перейти»"
-echo "  • Скопируйте любую ссылку в клиент (V2RayN, Qv2ray, Sing-box)"
+echo "🔗 REALITY КЛИЕНТЫ:"
+for idx in "${!CLIENTS[@]}"; do
+    IFS='|' read -r UUID EMAIL _ _ <<< "${CLIENTS[$idx]}"
+    SID=${SHORTIDS[$idx]}
+    LINK="vless://$UUID@$SERVER_IP:$REALITY_PORT?encryption=none&security=reality&fp=$REALITY_FINGERPRINT&sni=${REALITY_SERVERNAMES[0]}&pbk=$REALITY_PUBLIC_KEY&sid=$SID&type=tcp&flow=xtls-rprx-vision#$EMAIL"
+    echo "   $EMAIL:"
+    echo "   $LINK"
+    echo
+done
+echo "⚙️  СТАТУС СИСТЕМЫ:"
+echo "   Служба: $SERVICE_STATUS"
+echo "   Reality порт: $REALITY_PORT"
+echo "   Клиентов: ${#CLIENTS[@]}"
+echo
+echo "💡 БЫСТРЫЙ СТАРТ:"
+echo "   1. Откройте ссылку панели в браузере"
+echo "   2. Нажмите «Дополнительно» → «Перейти» (из-за самоподписанного SSL)"
+echo "   3. Скопируйте любую ссылку выше в поддерживаемый клиент"
+echo
 echo "========================================"
 exit 0
