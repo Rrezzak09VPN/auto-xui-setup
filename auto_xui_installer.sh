@@ -11,8 +11,8 @@ CERT_KEY_FILE="$CERT_DIR/secret.key"
 DB_PATH="/etc/x-ui/x-ui.db"
 BEFORE_RULES_FILE="/etc/ufw/before.rules"
 REALITY_PORT=443
-REALITY_TARGET="discord.com:443"
-REALITY_SERVERNAMES=("discord.com" "www.discord.com")
+REALITY_TARGET="github.com:443"
+REALITY_SERVERNAMES=("github.com" "www.github.com")
 REALITY_FINGERPRINT="chrome"
 REALITY_SPIDERX="/"
 # --------------------
