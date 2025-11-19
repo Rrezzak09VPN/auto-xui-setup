@@ -111,36 +111,85 @@ log_success "UFW настроен."
 
 # --- Шаг 10: Блокировка ICMP (ping) ---
 log "🔇 Блокировка ICMP (ping)..."
-safe_replace_accept_in_section() {
-    local sec="$1"
-    grep -q "^$sec" "$BEFORE_RULES_FILE" || return 0
-    local tmp=$(mktemp)
-    awk -v s="$sec" '
-        $0~"^"s{in_sec=1;print;next}
-        in_sec&&/^[^#]/{gsub(/-j ACCEPT/,"-j DROP");print;next}
-        in_sec&&/^#/{in_sec=0} {print}
-    ' "$BEFORE_RULES_FILE" > "$tmp" && mv "$tmp" "$BEFORE_RULES_FILE"
-}
-safe_add_source_quench() {
-    local rule="-A ufw-before-input -p icmp --icmp-type source-quench -j DROP"
-    grep -qF -- "$rule" "$BEFORE_RULES_FILE" && return 0
-    for hdr in "# ok icmp codes for INPUT" "# ok icmp code for INPUT"; do
-        if grep -q "^$hdr" "$BEFORE_RULES_FILE"; then
-            awk -v r="$rule" -v h="$hdr" '
-                $0~"^"h{print;r_added=0;next}
-                !r_added&&/^[^#]/&&!/source-quench/{print r;r_added=1}{print}
-            ' "$BEFORE_RULES_FILE" > "${BEFORE_RULES_FILE}.tmp" &&
-            mv "${BEFORE_RULES_FILE}.tmp" "$BEFORE_RULES_FILE" && break
-        fi
-    done
-}
-safe_replace_accept_in_section "# ok icmp codes for INPUT"
-safe_replace_accept_in_section "# ok icmp code for INPUT"
-safe_replace_accept_in_section "# ok icmp codes for FORWARD"
-safe_replace_accept_in_section "# ok icmp code for FORWARD"
-safe_add_source_quench
+# Создаем корректный before.rules с правильной структурой
+cat > "$BEFORE_RULES_FILE" << 'EOF'
+# rules.before
+#
+# Rules that should be run before the ufw command line added rules. Custom
+# rules should be added to one of these chains:
+#   ufw-before-input
+#   ufw-before-output
+#   ufw-before-forward
+#
+
+*filter
+:ufw-before-input - [0:0]
+:ufw-before-output - [0:0]
+:ufw-before-forward - [0:0]
+:ufw-not-local - [0:0]
+
+# allow all on loopback
+-A ufw-before-input -i lo -j ACCEPT
+-A ufw-before-output -o lo -j ACCEPT
+
+# quickly process packets for which we already have a connection
+-A ufw-before-input -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A ufw-before-output -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A ufw-before-forward -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+# drop INVALID packets (logs these in loglevel medium and higher)
+-A ufw-before-input -m conntrack --ctstate INVALID -j ufw-logging-deny
+-A ufw-before-input -m conntrack --ctstate INVALID -j DROP
+
+# ok icmp codes for INPUT
+-A ufw-before-input -p icmp --icmp-type destination-unreachable -j DROP
+-A ufw-before-input -p icmp --icmp-type time-exceeded -j DROP
+-A ufw-before-input -p icmp --icmp-type parameter-problem -j DROP
+-A ufw-before-input -p icmp --icmp-type echo-request -j DROP
+-A ufw-before-input -p icmp --icmp-type source-quench -j DROP
+
+# ok icmp code for FORWARD
+-A ufw-before-forward -p icmp --icmp-type destination-unreachable -j DROP
+-A ufw-before-forward -p icmp --icmp-type time-exceeded -j DROP
+-A ufw-before-forward -p icmp --icmp-type parameter-problem -j DROP
+-A ufw-before-forward -p icmp --icmp-type echo-request -j DROP
+
+# allow dhcp client to work
+-A ufw-before-input -p udp --sport 67 --dport 68 -j ACCEPT
+
+#
+# ufw-not-local
+#
+-A ufw-before-input -j ufw-not-local
+
+# if LOCAL, RETURN
+-A ufw-not-local -m addrtype --dst-type LOCAL -j RETURN
+
+# if MULTICAST, RETURN
+-A ufw-not-local -m addrtype --dst-type MULTICAST -j RETURN
+
+# if BROADCAST, RETURN
+-A ufw-not-local -m addrtype --dst-type BROADCAST -j RETURN
+
+# all other non-local packets are dropped
+-A ufw-not-local -m limit --limit 3/min --limit-burst 10 -j ufw-logging-deny
+-A ufw-not-local -j DROP
+
+# allow MULTICAST mDNS for service discovery
+-A ufw-before-input -p udp -d 224.0.0.251 --dport 5353 -j ACCEPT
+
+# allow MULTICAST UPnP for service discovery
+-A ufw-before-input -p udp -d 239.255.255.250 --dport 1900 -j ACCEPT
+
+COMMIT
+EOF
+
+# Убедимся что UFW разрешает исходящий трафик
+ufw default allow outgoing >/dev/null 2>&1
+ufw default deny incoming >/dev/null 2>&1
+
 ufw reload >/dev/null 2>&1
-log_success "ICMP заблокирован."
+log_success "ICMP успешно заблокирован!"
 
 # ===================================================================================
 # === ШАГ 11: VLESS + REALITY INBOUND — ПОЛНОСТЬЮ ИСПРАВЛЕННЫЙ БЛОК =================
