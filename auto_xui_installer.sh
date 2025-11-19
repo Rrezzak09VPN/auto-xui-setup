@@ -1,7 +1,6 @@
 #!/bin/bash
-
 # auto_xui_installer.sh - Автоматическая установка 3x-ui + VLESS+Reality inbound (3 клиента)
-# Версия: 6.4.1-FINAL — исправлена совместимость с curl
+# Версия: 7.0-FINAL — полностью проверенная версия
 # Обновлено: 19 ноября 2025 г.
 
 # --- Конфигурация ---
@@ -12,8 +11,8 @@ CERT_KEY_FILE="$CERT_DIR/secret.key"
 DB_PATH="/etc/x-ui/x-ui.db"
 BEFORE_RULES_FILE="/etc/ufw/before.rules"
 REALITY_PORT=443
-REALITY_TARGET="google.com:443"
-REALITY_SERVERNAMES=("google.com" "www.google.com")
+REALITY_TARGET="discord.com:443"
+REALITY_SERVERNAMES=("discord.com" "www.discord.com")
 REALITY_FINGERPRINT="chrome"
 REALITY_SPIDERX="/"
 # --------------------
@@ -35,7 +34,7 @@ generate_short_id() {
 # --------------------------
 
 echo "========================================"
-log "🚀 Начало автоматической установки 3x-ui (v6.4.1-FINAL)"
+log "🚀 Начало автоматической установки 3x-ui (v7.0-FINAL)"
 log "   Включая VLESS+Reality inbound и 3 клиента"
 echo "========================================"
 
@@ -44,7 +43,7 @@ echo "========================================"
 
 # --- Шаг 2: Установка зависимостей ---
 log "📦 Установка зависимостей..."
-apt-get update > /dev/null 2>&1 && apt-get install -y curl openssl sqlite3 ufw net-tools uuid-runtime > /dev/null 2>&1 || {
+apt-get update > /dev/null 2>&1 && apt-get install -y curl openssl sqlite3 ufw net-tools uuid-runtime jq > /dev/null 2>&1 || {
     log_error "Ошибка установки зависимостей."; exit 1;
 }
 log_success "Зависимости установлены."
@@ -52,7 +51,6 @@ log_success "Зависимости установлены."
 # --- Шаг 3: Запуск официального установщика ---
 log "📥 Запуск установщика 3x-ui..."
 rm -f "$LOG_FILE"
-# Исправленная команда - убрана проблемная опция curl
 bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) <<< "n" 2>&1 | tee "$LOG_FILE"
 INSTALLER_EXIT_CODE=${PIPESTATUS[0]}
 [[ $INSTALLER_EXIT_CODE -ne 0 ]] && { log_error "Ошибка установки 3x-ui (код $INSTALLER_EXIT_CODE)."; exit 1; }
@@ -109,7 +107,6 @@ log_success "UFW настроен."
 
 # --- Шаг 10: Блокировка ICMP (ping) ---
 log "🔇 Блокировка ICMP (ping)..."
-# Создаем корректный before.rules с правильной структурой
 cat > "$BEFORE_RULES_FILE" << 'EOF'
 # rules.before
 #
@@ -119,78 +116,60 @@ cat > "$BEFORE_RULES_FILE" << 'EOF'
 #   ufw-before-output
 #   ufw-before-forward
 #
-
 *filter
 :ufw-before-input - [0:0]
 :ufw-before-output - [0:0]
 :ufw-before-forward - [0:0]
 :ufw-not-local - [0:0]
-
 # allow all on loopback
 -A ufw-before-input -i lo -j ACCEPT
 -A ufw-before-output -o lo -j ACCEPT
-
 # quickly process packets for which we already have a connection
 -A ufw-before-input -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 -A ufw-before-output -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 -A ufw-before-forward -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-
 # drop INVALID packets (logs these in loglevel medium and higher)
 -A ufw-before-input -m conntrack --ctstate INVALID -j ufw-logging-deny
 -A ufw-before-input -m conntrack --ctstate INVALID -j DROP
-
 # ok icmp codes for INPUT
 -A ufw-before-input -p icmp --icmp-type destination-unreachable -j DROP
 -A ufw-before-input -p icmp --icmp-type time-exceeded -j DROP
 -A ufw-before-input -p icmp --icmp-type parameter-problem -j DROP
 -A ufw-before-input -p icmp --icmp-type echo-request -j DROP
 -A ufw-before-input -p icmp --icmp-type source-quench -j DROP
-
 # ok icmp code for FORWARD
 -A ufw-before-forward -p icmp --icmp-type destination-unreachable -j DROP
 -A ufw-before-forward -p icmp --icmp-type time-exceeded -j DROP
 -A ufw-before-forward -p icmp --icmp-type parameter-problem -j DROP
 -A ufw-before-forward -p icmp --icmp-type echo-request -j DROP
-
 # allow dhcp client to work
 -A ufw-before-input -p udp --sport 67 --dport 68 -j ACCEPT
-
 #
 # ufw-not-local
 #
 -A ufw-before-input -j ufw-not-local
-
 # if LOCAL, RETURN
 -A ufw-not-local -m addrtype --dst-type LOCAL -j RETURN
-
 # if MULTICAST, RETURN
 -A ufw-not-local -m addrtype --dst-type MULTICAST -j RETURN
-
 # if BROADCAST, RETURN
 -A ufw-not-local -m addrtype --dst-type BROADCAST -j RETURN
-
 # all other non-local packets are dropped
 -A ufw-not-local -m limit --limit 3/min --limit-burst 10 -j ufw-logging-deny
 -A ufw-not-local -j DROP
-
 # allow MULTICAST mDNS for service discovery
 -A ufw-before-input -p udp -d 224.0.0.251 --dport 5353 -j ACCEPT
-
 # allow MULTICAST UPnP for service discovery
 -A ufw-before-input -p udp -d 239.255.255.250 --dport 1900 -j ACCEPT
-
 COMMIT
 EOF
-
-# Убедимся что UFW разрешает исходящий трафик
 ufw default allow outgoing >/dev/null 2>&1
 ufw default deny incoming >/dev/null 2>&1
-
 ufw reload >/dev/null 2>&1
 log_success "ICMP заблокирован."
 
 # ===================================================================================
-# === ШАГ 11: VLESS + REALITY INBOUND — ПОЛНОСТЬЮ ИСПРАВЛЕННЫЙ БЛОК =================
+# === ШАГ 11: VLESS + REALITY INBOUND — ФИНАЛЬНАЯ ПРОВЕРЕННАЯ ВЕРСИЯ ================
 # ===================================================================================
 
 log "⚡ Шаг 11: Настройка VLESS+Reality inbound..."
@@ -208,9 +187,10 @@ if [[ "$PANEL_PORT" == "$REALITY_PORT" ]]; then
     NEW_PORT="2053"
     log_warn "Панель использует порт $REALITY_PORT → меняем на $NEW_PORT"
     sqlite3 "$DB_PATH" "UPDATE settings SET value = '$NEW_PORT' WHERE key = 'webPort';"
+    systemctl restart x-ui
+    sleep 3
 fi
 
-# --- Поиск и проверка Xray ---
 log "🔍 Поиск Xray бинарника..."
 XRAY_BIN=""
 for candidate in /usr/local/x-ui/bin/xray*; do
@@ -219,17 +199,17 @@ for candidate in /usr/local/x-ui/bin/xray*; do
     case "$candidate" in *.dat|*.md|*.json|*.txt|*README*) continue ;; esac
     XRAY_BIN="$candidate"; break
 done
-[[ -z "$XRAY_BIN" ]] && { log_error "Xray не найден."; ls -la /usr/local/x-ui/bin/ | log; exit 1; }
+[[ -z "$XRAY_BIN" ]] && { log_error "Xray не найден."; exit 1; }
 
 "$XRAY_BIN" version >/dev/null 2>&1 || {
     log_error "Файл $XRAY_BIN не является валидным Xray."; exit 1;
 }
 log "✅ Xray: $($XRAY_BIN version | head -n1 | cut -d' ' -f1-3)"
 
-# --- Генерация Reality-ключей ---
 log "🔐 Генерация Reality ключей (x25519)..."
 REALITY_KEYS=$("$XRAY_BIN" x25519 2>&1)
 REALITY_PRIVATE_KEY=$(echo "$REALITY_KEYS" | grep -i "PrivateKey:" | awk '{print $2}')
+# ✅ ПРАВИЛЬНО: Password для публичного ключа (проверено!)
 REALITY_PUBLIC_KEY=$(echo "$REALITY_KEYS" | grep -i "Password:" | awk '{print $2}')
 
 if [[ -z "$REALITY_PRIVATE_KEY" || -z "$REALITY_PUBLIC_KEY" ]]; then
@@ -248,12 +228,12 @@ for i in {1..3}; do
     CLIENTS+=("$UUID|$EMAIL|$SUBID|$TS")
 done
 
-# --- Формирование JSON (ИСПРАВЛЕННАЯ СТРУКТУРА) ---
+# --- Формирование JSON — ✅ ПРАВИЛЬНО: tgId как пустая строка (проверено!) ---
 SETTINGS_JSON='{"clients":['
 for idx in "${!CLIENTS[@]}"; do
     IFS='|' read -r UUID EMAIL SUBID TS <<< "${CLIENTS[$idx]}"
     [[ $idx -gt 0 ]] && SETTINGS_JSON+=","
-    SETTINGS_JSON+="{\"id\":\"$UUID\",\"security\":\"\",\"password\":\"\",\"flow\":\"xtls-rprx-vision\",\"email\":\"$EMAIL\",\"limitIp\":0,\"totalGB\":0,\"expiryTime\":0,\"enable\":true,\"tgId\":0,\"subId\":\"$SUBID\",\"comment\":\"\",\"reset\":0,\"created_at\":$TS,\"updated_at\":$TS}"
+    SETTINGS_JSON+="{\"id\":\"$UUID\",\"security\":\"\",\"password\":\"\",\"flow\":\"xtls-rprx-vision\",\"email\":\"$EMAIL\",\"limitIp\":0,\"totalGB\":0,\"expiryTime\":0,\"enable\":true,\"tgId\":\"\",\"subId\":\"$SUBID\",\"comment\":\"\",\"reset\":0,\"created_at\":$TS,\"updated_at\":$TS}"
 done
 SETTINGS_JSON+='],"decryption":"none","encryption":"none"}'
 
@@ -267,17 +247,17 @@ cp "$DB_PATH" "$BACKUP_DB" && log "💾 Бэкап БД: $BACKUP_DB"
 sqlite3 "$DB_PATH" "DELETE FROM inbounds WHERE port = $REALITY_PORT;" 2>/dev/null
 
 log "📥 Вставка inbound в БД..."
-ADMIN_USER_ID=$(sqlite3 "$DB_PATH" "SELECT id FROM users WHERE username = '$EXTRACTED_USERNAME';")
+ADMIN_USER_ID=$(sqlite3 "$DB_PATH" "SELECT id FROM users WHERE username = '$EXTRACTED_USERNAME';" 2>/dev/null)
 [[ -z "$ADMIN_USER_ID" ]] && ADMIN_USER_ID=1
 UNIQUE_TAG="auto-reality-$(date +%s)"
 
 sqlite3 "$DB_PATH" <<EOF
 INSERT INTO inbounds (
-    user_id, up, down, total, remark, enable, expiry_time,
+    user_id, up, down, total, all_time, remark, enable, expiry_time,
     traffic_reset, last_traffic_reset_time, listen, port, protocol,
     settings, stream_settings, tag, sniffing
 ) VALUES (
-    $ADMIN_USER_ID, 0, 0, 0, 'AutoReality', 1, 0,
+    $ADMIN_USER_ID, 0, 0, 0, 0, 'AutoReality', 1, 0,
     'never', 0, '', $REALITY_PORT, 'vless',
     '$(echo "$SETTINGS_JSON" | sed "s/'/''/g")',
     '$(echo "$STREAM_JSON" | sed "s/'/''/g")',
@@ -292,37 +272,25 @@ if [[ $? -ne 0 ]]; then
 fi
 log_success "Inbound добавлен."
 
-# --- Перезапуск и улучшенная проверка ---
+# --- КРИТИЧЕСКИ ВАЖНО: создание записей статистики ---
+log "📊 Создание записей статистики..."
+INBOUND_ID=$(sqlite3 "$DB_PATH" "SELECT id FROM inbounds WHERE tag = '$UNIQUE_TAG';")
+for idx in "${!CLIENTS[@]}"; do
+    IFS='|' read -r UUID EMAIL SUBID TS <<< "${CLIENTS[$idx]}"
+    sqlite3 "$DB_PATH" "INSERT OR IGNORE INTO client_traffics (inbound_id, enable, email, up, down, all_time, expiry_time, total, reset, last_online) VALUES ($INBOUND_ID, 1, '$EMAIL', 0, 0, 0, 0, 0, 0, 0);" 2>/dev/null
+    sqlite3 "$DB_PATH" "INSERT OR IGNORE INTO inbound_client_ips (client_email, ips) VALUES ('$EMAIL', '[]');" 2>/dev/null
+done
+log_success "Записи статистики созданы для всех клиентов"
+
+# --- Перезапуск и проверка ---
 systemctl restart x-ui
-sleep 8  # Даем больше времени на запуск
+sleep 8
 
-# МНОГОУРОВНЕВАЯ ДИАГНОСТИКА ИНБАУНДА
-log "🔍 Проверка статуса Reality inbound..."
-
-# Уровень 1: Проверяем слушает ли порт (САМЫЙ НАДЕЖНЫЙ ПРИЗНАК)
 if ss -tuln 2>/dev/null | grep -q ":$REALITY_PORT "; then
-    log_success "✅ Reality inbound АКТИВЕН на порту $REALITY_PORT (порт слушается)"
-
-# Уровень 2: Проверяем Xray процесс
-elif ! systemctl is-active x-ui >/dev/null; then
-    log_error "❌ Xray НЕ ЗАПУЩЕН. Срочно проверьте: journalctl -u x-ui -n 50"
-
-# Уровень 3: Расширенная проверка логов
+    log_success "✅ Reality inbound активен на порту $REALITY_PORT"
 else
-    # Проверяем различные варианты сообщений в логах
-    if journalctl -u x-ui -n 50 2>/dev/null | grep -qi "reality.*started\|started.*reality"; then
-        log_success "✅ Reality inbound ЗАПУЩЕН (подтверждено в логах)"
-    elif journalctl -u x-ui -n 50 2>/dev/null | grep -qi "порт.*$REALITY_PORT\|port.*$REALITY_PORT"; then
-        log_success "✅ Reality inbound ЗАПУЩЕН (порт $REALITY_PORT упоминается)"
-    elif journalctl -u x-ui -n 50 2>/dev/null | grep -qi "inbound.*started\|started.*inbound"; then
-        log_success "✅ Inbound ЗАПУЩЕН (общее подтверждение)"
-    elif journalctl -u x-ui -n 50 2>/dev/null | grep -qi "error\|fail\|failed"; then
-        log_error "❌ Обнаружены ОШИБКИ в логах Xray. Проверьте: journalctl -u x-ui -n 30"
-    else
-        log_warn "⚠️  Inbound не подтверждён в логах, но Xray запущен."
-        log_warn "    Это МОЖЕТ БЫТЬ НОРМАЛЬНО - некоторые версии не логируют запуск."
-        log_warn "    Проверьте подключение клиентом. Для диагностики: journalctl -u x-ui -n 20"
-    fi
+    log_error "❌ Reality inbound НЕ запущен. Проверьте: journalctl -u x-ui -n 30"
+    exit 1
 fi
 
 # ===================================================================================
@@ -334,11 +302,9 @@ PANEL_URL="https://$SERVER_IP:$PANEL_PORT$(echo "/$EXTRACTED_WEBBASEPATH" | sed 
 SERVICE_STATUS=$(systemctl is-active x-ui 2>/dev/null)
 
 # Очистка временных файлов
-log "🧹 Очистка временных файлов..."
 rm -f "$LOG_FILE" 2>/dev/null
 rm -f "$BACKUP_DB" 2>/dev/null
 rm -f /tmp/xui_install_log_*.txt 2>/dev/null
-log_success "Временные файлы удалены."
 
 echo
 echo "========================================"
@@ -365,9 +331,9 @@ echo "   Reality порт: $REALITY_PORT"
 echo "   Клиентов: ${#CLIENTS[@]}"
 echo
 echo "💡 БЫСТРЫЙ СТАРТ:"
-echo "   1. Откройте ссылку панели в браузере"
-echo "   2. Нажмите «Дополнительно» → «Перейти» (из-за самоподписанного SSL)"
-echo "   3. Скопируйте любую ссылку выше в поддерживаемый клиент"
+echo "   1. Откройте панель в браузере"
+echo "   2. Нажмите «Дополнительно» → «Перейти»"
+echo "   3. Скопируйте ссылку в клиент (Qv2ray, V2RayN, Sing-box...)"
 echo
 echo "========================================"
 exit 0
